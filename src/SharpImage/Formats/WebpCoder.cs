@@ -310,108 +310,98 @@ public static class WebpCoder
     }
 
     /// <summary>
-    /// Writes an ImageSequence as an animated WebP (VP8X + ANIM + one full-canvas ANMF per frame). quality &gt;= 100
-    /// codes every frame losslessly, otherwise lossy at that quality (with an ALPH chunk for transparent frames).
+    /// Writes an ImageSequence as an animated WebP like img2webp: quality &gt;= 100 codes the frames losslessly,
+    /// otherwise lossy at that quality; the sequence's loop count is kept.
     /// </summary>
-    public static void WriteSequence(ImageSequence sequence, Stream stream, int quality = 100)
+    public static void WriteSequence(ImageSequence sequence, Stream stream, int quality = 100) =>
+        WriteSequence(sequence, stream, new WebP.WebpAnimationOptions
+        {
+            Lossless = quality >= 100,
+            Quality = quality >= 100 ? 75 : Math.Max(quality, 0),
+            LoopCount = sequence.LoopCount,
+        });
+
+    /// <summary>
+    /// Writes an ImageSequence as an animated WebP through the WebPAnimEncoder port (sub-frame rectangles,
+    /// dispose / blend and key-frame choices exactly as libwebp makes them). Frames that are not full canvases (GIF
+    /// style, with page offsets and disposal) are first composited onto the canvas the way gif2webp does.
+    /// </summary>
+    public static void WriteSequence(ImageSequence sequence, Stream stream, WebP.WebpAnimationOptions options)
     {
         if (sequence.Count == 0)
             throw new ArgumentException("Sequence has no frames.");
 
-        if (sequence.Count == 1)
-        {
-            Write(sequence[0], stream, quality);
-            return;
-        }
-
-        // Each frame's image chunks (ALPH + "VP8 ", or "VP8L"): a still encoding minus its RIFF / VP8X headers.
-        var frameChunks = new List<byte[]>();
-        bool anyAlpha = false;
-        for (int i = 0; i < sequence.Count; i++)
-        {
-            var frame = sequence[i];
-            using var ms = new MemoryStream();
-            Write(frame, ms, quality);
-            byte[] file = ms.ToArray();
-            int start = 12;
-            if (file.AsSpan(12, 4).SequenceEqual("VP8X"u8)) start += 8 + 10;
-            frameChunks.Add(file[start..]);
-            if (frame.HasAlpha) anyAlpha = true;
-        }
-
         int canvasWidth = sequence.CanvasWidth > 0 ? sequence.CanvasWidth : (int)sequence[0].Columns;
         int canvasHeight = sequence.CanvasHeight > 0 ? sequence.CanvasHeight : (int)sequence[0].Rows;
-
-        // Build the RIFF payload
-        using var payloadMs = new MemoryStream();
-        using (var bw = new BinaryWriter(payloadMs, System.Text.Encoding.ASCII, true))
+        bool fullCanvases = true;
+        foreach (var f in sequence.Frames)
         {
-            // VP8X chunk (extended format)
-            bw.Write("VP8X"u8);
-            bw.Write((uint)10);
-            byte vp8xFlags = 0x02; // animation flag
-            if (anyAlpha) vp8xFlags |= 0x10; // alpha flag
-            bw.Write(vp8xFlags);
-            bw.Write((byte)0); bw.Write((byte)0); bw.Write((byte)0); // reserved
-            Write24LE(bw, canvasWidth - 1);
-            Write24LE(bw, canvasHeight - 1);
-
-            // ANIM chunk
-            bw.Write("ANIM"u8);
-            bw.Write((uint)6);
-            bw.Write((uint)0); // background color (BGRA, transparent)
-            bw.Write((ushort)sequence.LoopCount);
-
-            // ANMF chunks
-            for (int i = 0; i < sequence.Count; i++)
+            if (f.Columns != canvasWidth || f.Rows != canvasHeight || f.Page.X != 0 || f.Page.Y != 0)
             {
-                var frame = sequence[i];
-                int frameWidth = (int)frame.Columns;
-                int frameHeight = (int)frame.Rows;
-                int durationMs = frame.Delay * 10; // centiseconds to ms
-                if (durationMs < 1) durationMs = 100; // default 100ms
-
-                byte[] subChunk = frameChunks[i];
-                int anmfPayloadSize = 16 + subChunk.Length;
-
-                bw.Write("ANMF"u8);
-                bw.Write((uint)anmfPayloadSize);
-                Write24LE(bw, 0); // frame X / 2
-                Write24LE(bw, 0); // frame Y / 2
-                Write24LE(bw, frameWidth - 1);
-                Write24LE(bw, frameHeight - 1);
-                Write24LE(bw, durationMs);
-                // bit 1 set: do not blend (each frame is a full replacement); bit 0: dispose to background
-                byte flags = 0x02;
-                if (frame.DisposeMethod == DisposeType.Background) flags |= 0x01;
-                bw.Write(flags);
-                bw.Write(subChunk);
-
-                if ((anmfPayloadSize & 1) != 0) bw.Write((byte)0);
+                fullCanvases = false;
+                break;
             }
         }
 
-        byte[] riffPayload = payloadMs.ToArray();
-        int riffSize = 4 + riffPayload.Length; // "WEBP" + payload
+        var enc = new WebP.WebpAnimEncoder(canvasWidth, canvasHeight, options);
+        var canvas = new uint[canvasWidth * canvasHeight];   // transparent
+        uint[]? beforePrevious = null;
+        int timestamp = 0;
+        for (int i = 0; i < sequence.Count; i++)
+        {
+            var frame = sequence[i];
+            uint[] argb = ImageFrameToArgb(frame);
+            uint[] full;
+            if (fullCanvases)
+            {
+                full = argb;
+            }
+            else
+            {
+                // dispose the previous frame, then draw this one (pixels with alpha 0 keep the canvas)
+                if (i > 0)
+                {
+                    var prev = sequence[i - 1];
+                    if (prev.DisposeMethod == DisposeType.Background)
+                        ClearRect(canvas, canvasWidth, canvasHeight, prev.Page.X, prev.Page.Y, (int)prev.Columns, (int)prev.Rows);
+                    else if (prev.DisposeMethod == DisposeType.Previous && beforePrevious != null)
+                        beforePrevious.CopyTo(canvas, 0);
+                }
+                beforePrevious = frame.DisposeMethod == DisposeType.Previous ? (uint[])canvas.Clone() : null;
+                int fw = (int)frame.Columns, fh = (int)frame.Rows;
+                for (int y = 0; y < fh; y++)
+                {
+                    int cy = frame.Page.Y + y;
+                    if (cy < 0 || cy >= canvasHeight) continue;
+                    for (int x = 0; x < fw; x++)
+                    {
+                        int cx = frame.Page.X + x;
+                        if (cx < 0 || cx >= canvasWidth) continue;
+                        uint p = argb[y * fw + x];
+                        if ((p >> 24) != 0) canvas[cy * canvasWidth + cx] = p;
+                    }
+                }
+                full = (uint[])canvas.Clone();
+            }
+            enc.Add(full, timestamp);
+            int durationMs = frame.Delay * 10; // centiseconds to ms
+            if (durationMs < 1) durationMs = 100; // default 100ms
+            timestamp += durationMs;
+        }
+        enc.Add(null, timestamp);
+        stream.Write(enc.Assemble());
+    }
 
-        using var finalBw = new BinaryWriter(stream, System.Text.Encoding.ASCII, true);
-        finalBw.Write("RIFF"u8);
-        finalBw.Write((uint)riffSize);
-        finalBw.Write("WEBP"u8);
-        finalBw.Write(riffPayload);
+    private static void ClearRect(uint[] canvas, int canvasWidth, int canvasHeight, int left, int top, int width, int height)
+    {
+        for (int y = Math.Max(top, 0); y < Math.Min(top + height, canvasHeight); y++)
+            for (int x = Math.Max(left, 0); x < Math.Min(left + width, canvasWidth); x++)
+                canvas[y * canvasWidth + x] = 0;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int Read24LE(byte[] data, int offset) =>
         data[offset] | (data[offset + 1] << 8) | (data[offset + 2] << 16);
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void Write24LE(BinaryWriter bw, int value)
-    {
-        bw.Write((byte)(value & 0xFF));
-        bw.Write((byte)((value >> 8) & 0xFF));
-        bw.Write((byte)((value >> 16) & 0xFF));
-    }
 
     private static ImageFrame DecodeVp8l(byte[] data)
     {

@@ -67,6 +67,8 @@ public sealed class WebpLossyOptions
     /// <summary>Keep the RGB under fully transparent pixels (cwebp -exact). Default false.</summary>
     public bool Exact { get; set; }
 
+    internal WebpLossyOptions Clone() => (WebpLossyOptions)MemberwiseClone();
+
     internal void Validate()
     {
         static void Check(bool ok, string what)
