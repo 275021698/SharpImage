@@ -1251,6 +1251,8 @@ internal static class Vp8LossyCodec
             // Convert YUV to ImageFrame using libwebp's exact fixed-point constants (dsp/yuv.h).
             var frame = new ImageFrame();
             bool hasAlpha = alphData != null;
+            // ALPH chunk: libwebp alpha_dec.c (raw or VP8L-coded levels, then unfiltering)
+            byte[]? alphaPlane = hasAlpha ? WebP.Vp8lDecoder.DecodeAlpha(alphData!, 0, alphData!.Length, width, height) : null;
             frame.Initialize(width, height, ColorspaceType.SRGB, hasAlpha);
             frame.Compression = CompressionType.WebP;
             int channels = frame.NumberOfChannels;
@@ -1275,7 +1277,7 @@ internal static class Vp8LossyCodec
                     row[off + 2] = Quantum.ScaleFromByte(b);
                     if (hasAlpha)
                     {
-                        row[off + 3] = Quantum.Opaque;
+                        row[off + 3] = Quantum.ScaleFromByte(alphaPlane![y * width + x]);
                     }
                 }
             }

@@ -62,6 +62,7 @@ public static class WebpCoder
         byte[]? vp8lData = null;
         byte[]? vp8Data = null;
         byte[]? alphData = null;
+        bool isAnimation = false;
 
         while (offset + 8 <= data.Length)
         {
@@ -85,6 +86,10 @@ public static class WebpCoder
                 alphData = new byte[safeSize];
                 Buffer.BlockCopy(data, chunkStart, alphData, 0, safeSize);
             }
+            else if (c0 == 'V' && c1 == 'P' && c2 == '8' && c3 == 'X' && safeSize >= 10)
+            {
+                isAnimation = (data[chunkStart] & 0x02) != 0;
+            }
 
             offset += 8 + (int)Math.Min(chunkSize, (uint)(data.Length - offset));
             if ((chunkSize & 1) != 0)
@@ -103,6 +108,12 @@ public static class WebpCoder
             return DecodeVp8Lossy(vp8Data, alphData);
         }
 
+        // An animated WebP: the first frame, composited onto the canvas (WebPAnimDecoder).
+        if (isAnimation)
+        {
+            var sequence = ReadSequence(new MemoryStream(data));
+            if (sequence.Count > 0) return sequence[0];
+        }
         throw new InvalidDataException("No VP8 or VP8L chunk found in WebP file.");
     }
 
@@ -180,75 +191,117 @@ public static class WebpCoder
         sequence.CanvasWidth = canvasWidth;
         sequence.CanvasHeight = canvasHeight;
 
-        // Parse ANIM and ANMF chunks
-        offset = 12;
-        while (offset + 8 <= data.Length)
+        // Decode every ANMF frame, then composite them the way libwebp's WebPAnimDecoder does.
+        var animFrames = ReadAnimationFrames(data, out int loopCount);
+        sequence.LoopCount = loopCount;
+        var canvases = WebP.WebpAnimDecoder.Composite(animFrames, canvasWidth, canvasHeight);
+        for (int f = 0; f < canvases.Count; f++)
         {
-            byte c0 = data[offset], c1 = data[offset + 1], c2 = data[offset + 2], c3 = data[offset + 3];
-            uint chunkSize = BitConverter.ToUInt32(data, offset + 4);
-            int safeSize = (int)Math.Min(chunkSize, data.Length - offset - 8);
-            int chunkStart = offset + 8;
-
-            if (c0 == 'A' && c1 == 'N' && c2 == 'I' && c3 == 'M' && safeSize >= 6)
-            {
-                sequence.LoopCount = BitConverter.ToUInt16(data, chunkStart + 4);
-            }
-            else if (c0 == 'A' && c1 == 'N' && c2 == 'M' && c3 == 'F' && safeSize >= 16)
-            {
-                int frameX = Read24LE(data, chunkStart) * 2;
-                int frameY = Read24LE(data, chunkStart + 3) * 2;
-                int frameWidth = Read24LE(data, chunkStart + 6) + 1;
-                int frameHeight = Read24LE(data, chunkStart + 9) + 1;
-                int durationMs = Read24LE(data, chunkStart + 12);
-                byte frameFlags = data[chunkStart + 15];
-                // bit 1 = blending (0 = alpha blend, 1 = don't blend)
-                // bit 0 = disposal (0 = don't dispose, 1 = dispose to background)
-                bool disposeToBackground = (frameFlags & 0x01) != 0;
-
-                // The frame data starts at chunkStart + 16 and contains a VP8/VP8L sub-chunk
-                int subOffset = chunkStart + 16;
-                int subRemaining = safeSize - 16;
-
-                ImageFrame? frame = null;
-                if (subRemaining >= 8)
-                {
-                    byte s0 = data[subOffset], s1 = data[subOffset + 1], s2 = data[subOffset + 2], s3 = data[subOffset + 3];
-                    uint subSize = BitConverter.ToUInt32(data, subOffset + 4);
-                    int subDataSize = (int)Math.Min(subSize, subRemaining - 8);
-                    byte[] subData = new byte[subDataSize];
-                    Buffer.BlockCopy(data, subOffset + 8, subData, 0, subDataSize);
-
-                    if (s0 == 'V' && s1 == 'P' && s2 == '8' && s3 == 'L')
-                    {
-                        frame = DecodeVp8l(subData);
-                    }
-                    else if (s0 == 'V' && s1 == 'P' && s2 == '8' && s3 == ' ')
-                    {
-                        // Check for ALPH chunk inside ANMF (may precede VP8)
-                        byte[]? alphData = null;
-                        // VP8 lossy frames in ANMF may have an ALPH chunk before VP8
-                        // Re-scan sub-chunks within ANMF payload
-                        frame = DecodeVp8Lossy(subData, alphData);
-                    }
-                }
-
-                if (frame != null)
-                {
-                    // Convert duration from ms to centiseconds (like GIF)
-                    frame.Delay = Math.Max(1, durationMs / 10);
-                    frame.DisposeMethod = disposeToBackground ? DisposeType.Background : DisposeType.None;
-                    sequence.AddFrame(frame);
-                }
-            }
-
-            offset += 8 + (int)Math.Min(chunkSize, (uint)(data.Length - offset));
-            if ((chunkSize & 1) != 0) offset++;
+            var frame = ArgbToImageFrame(canvases[f], canvasWidth, canvasHeight, true);
+            // Convert duration from ms to centiseconds (like GIF)
+            frame.Delay = Math.Max(1, animFrames[f].DurationMs / 10);
+            frame.DisposeMethod = DisposeType.None;   // frames are already composited onto the full canvas
+            sequence.AddFrame(frame);
         }
 
         if (sequence.Count == 0)
             throw new InvalidDataException("No animation frames found in animated WebP.");
 
         return sequence;
+    }
+
+    /// <summary>The ANMF frames of an animated WebP (each with an optional ALPH + VP8, or VP8L), decoded to ARGB.</summary>
+    private static List<WebP.WebpAnimFrame> ReadAnimationFrames(byte[] data, out int loopCount)
+    {
+        var frames = new List<WebP.WebpAnimFrame>();
+        loopCount = 0;
+        int offset = 12;
+        while (offset + 8 <= data.Length)
+        {
+            byte c0 = data[offset], c1 = data[offset + 1], c2 = data[offset + 2], c3 = data[offset + 3];
+            uint chunkSize = BitConverter.ToUInt32(data, offset + 4);
+            int safeSize = (int)Math.Min(chunkSize, (uint)(data.Length - offset - 8));
+            int chunkStart = offset + 8;
+            if (c0 == 'A' && c1 == 'N' && c2 == 'I' && c3 == 'M' && safeSize >= 6)
+            {
+                loopCount = BitConverter.ToUInt16(data, chunkStart + 4);
+            }
+            else if (c0 == 'A' && c1 == 'N' && c2 == 'M' && c3 == 'F' && safeSize >= 16)
+            {
+                var af = new WebP.WebpAnimFrame
+                {
+                    X = Read24LE(data, chunkStart) * 2,
+                    Y = Read24LE(data, chunkStart + 3) * 2,
+                    Width = Read24LE(data, chunkStart + 6) + 1,
+                    Height = Read24LE(data, chunkStart + 9) + 1,
+                    DurationMs = Read24LE(data, chunkStart + 12),
+                };
+                byte frameFlags = data[chunkStart + 15];
+                af.DisposeToBackground = (frameFlags & 0x01) != 0;
+                af.Blend = (frameFlags & 0x02) == 0;
+
+                int subOffset = chunkStart + 16;
+                int subRemaining = safeSize - 16;
+                byte[]? frameAlpha = null;
+                ImageFrame? decoded = null;
+                while (subRemaining >= 8)
+                {
+                    byte s0 = data[subOffset], s1 = data[subOffset + 1], s2 = data[subOffset + 2], s3 = data[subOffset + 3];
+                    uint subSize = BitConverter.ToUInt32(data, subOffset + 4);
+                    int subDataSize = (int)Math.Min(subSize, (uint)(subRemaining - 8));
+                    byte[] subData = new byte[subDataSize];
+                    Buffer.BlockCopy(data, subOffset + 8, subData, 0, subDataSize);
+                    if (s0 == 'A' && s1 == 'L' && s2 == 'P' && s3 == 'H')
+                    {
+                        frameAlpha = subData;
+                    }
+                    else if (s0 == 'V' && s1 == 'P' && s2 == '8' && s3 == 'L')
+                    {
+                        af.Argb = WebP.Vp8lDecoder.Decode(subData, 0, subData.Length, out int w, out int h, out bool alpha);
+                        af.HasAlpha = alpha;
+                        if (w != af.Width || h != af.Height) throw new InvalidDataException("ANMF frame size mismatch.");
+                        break;
+                    }
+                    else if (s0 == 'V' && s1 == 'P' && s2 == '8' && s3 == ' ')
+                    {
+                        decoded = DecodeVp8Lossy(subData, frameAlpha);
+                        af.HasAlpha = frameAlpha != null;
+                        break;
+                    }
+                    int advance = 8 + subDataSize + (subDataSize & 1);
+                    subOffset += advance;
+                    subRemaining -= advance;
+                }
+                if (decoded != null)
+                {
+                    if (decoded.Columns != af.Width || decoded.Rows != af.Height) throw new InvalidDataException("ANMF frame size mismatch.");
+                    af.Argb = ImageFrameToArgb(decoded);
+                }
+                if (af.Argb.Length == 0) throw new InvalidDataException("ANMF frame without image data.");
+                frames.Add(af);
+            }
+            offset += 8 + (int)Math.Min(chunkSize, (uint)(data.Length - offset - 8));
+            if ((chunkSize & 1) != 0) offset++;
+        }
+        if (frames.Count == 0) throw new InvalidDataException("No animation frames found in animated WebP.");
+        return frames;
+    }
+
+    private static uint[] ImageFrameToArgb(ImageFrame img)
+    {
+        int w = (int)img.Columns, h = (int)img.Rows, ch = img.NumberOfChannels;
+        var argb = new uint[w * h];
+        for (int y = 0; y < h; y++)
+        {
+            var row = img.GetPixelRow(y);
+            for (int x = 0; x < w; x++)
+            {
+                uint r = (uint)(row[x * ch] >> 8), g = (uint)(row[x * ch + 1] >> 8), b = (uint)(row[x * ch + 2] >> 8);
+                uint a = img.HasAlpha ? (uint)(row[x * ch + ch - 1] >> 8) : 255u;
+                argb[y * w + x] = (a << 24) | (r << 16) | (g << 8) | b;
+            }
+        }
+        return argb;
     }
 
     /// <summary>
@@ -626,31 +679,12 @@ public static class WebpCoder
 
     private static ImageFrame DecodeVp8l(byte[] data)
     {
-        if (data.Length < 1 || data[0] != Vp8lSignatureByte)
-        {
-            throw new InvalidDataException("Invalid VP8L signature byte.");
-        }
-
-        var reader = new Vp8lBitReader(data, 1);
-        int width = (int)reader.ReadBits(14) + 1;
-        int height = (int)reader.ReadBits(14) + 1;
-        bool alphaUsed = reader.ReadBits(1) == 1;
-        uint version = reader.ReadBits(3);
-        if (version != 0)
-        {
-            throw new InvalidDataException($"Unsupported VP8L version: {version}");
-        }
-
+        // libwebp 1.6.0 vp8l_dec.c semantics (Formats/WebP/Vp8lDecoder.cs)
+        uint[] pixels = WebP.Vp8lDecoder.Decode(data, 0, data.Length, out int width, out int height, out bool alphaUsed);
         if (width > MaxWebpDimension || height > MaxWebpDimension)
         {
             throw new InvalidDataException("WebP image dimensions exceed maximum.");
         }
-
-        int decodedWidth = width;
-        var transforms = ReadTransforms(ref reader, ref decodedWidth, height);
-        uint[] pixels = DecodeImageStream(ref reader, decodedWidth, height, true);
-        ApplyInverseTransforms(pixels, ref decodedWidth, height, transforms, width);
-
         return ArgbToImageFrame(pixels, width, height, alphaUsed);
     }
 
