@@ -1,3 +1,6 @@
+using System.Runtime.Intrinsics.X86;
+using System.Runtime.Intrinsics;
+using System.Runtime.InteropServices;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 
@@ -445,34 +448,117 @@ internal static partial class Vp8lCommon
         return (byte)(newBlue & 0xff);
     }
 
+    // CST_5b / MK_CST_16 (lossless_enc_sse2.c)
+    private static short Cst5b(int x) => (short)((short)((ushort)x << 8) >> 5);
+    private static Vector128<short> MkCst16(int hi, int lo) => Vector128.Create((int)(((uint)hi << 16) | ((uint)lo & 0xffff))).AsInt16();
+
     internal static void CollectColorRedTransforms(uint[] argb, int off, int stride, int tileWidth, int tileHeight,
         int greenToRed, uint[] histo)
     {
-        while (tileHeight-- > 0)
+        int x0 = 0;
+        if (Sse2.IsSupported && tileWidth >= 8)
         {
-            for (int x = 0; x < tileWidth; ++x) ++histo[TransformColorRed((byte)greenToRed, argb[off + x])];
-            off += stride;
+            // CollectColorRedTransforms_SSE2
+            var multsG = MkCst16(0, Cst5b(greenToRed));
+            var maskG = Vector128.Create(0x00ff00);
+            var mask = Vector128.Create(0xff);
+            ref uint h = ref MemoryMarshal.GetArrayDataReference(histo);
+            ref uint a = ref MemoryMarshal.GetArrayDataReference(argb);
+            int spanEnd = tileWidth & ~7;
+            for (int y = 0; y < tileHeight; ++y)
+            {
+                int src = off + y * stride;
+                for (int x = 0; x < spanEnd; x += 8)
+                {
+                    var in0 = Unsafe.ReadUnaligned<Vector128<int>>(ref Unsafe.As<uint, byte>(ref Unsafe.Add(ref a, src + x)));
+                    var in1 = Unsafe.ReadUnaligned<Vector128<int>>(ref Unsafe.As<uint, byte>(ref Unsafe.Add(ref a, src + x + 4)));
+                    var A0 = Sse2.And(in0, maskG);                      // 0 0  | g 0
+                    var A1 = Sse2.And(in1, maskG);
+                    var B0 = Sse2.ShiftRightLogical(in0, 16);           // 0 0  | x r
+                    var B1 = Sse2.ShiftRightLogical(in1, 16);
+                    var C0 = Sse2.MultiplyHigh(A0.AsInt16(), multsG);   // 0 0  | x dr
+                    var C1 = Sse2.MultiplyHigh(A1.AsInt16(), multsG);
+                    var E0 = Sse2.Subtract(B0.AsByte(), C0.AsByte());   // x x  | x r'
+                    var E1 = Sse2.Subtract(B1.AsByte(), C1.AsByte());
+                    var F0 = Sse2.And(E0.AsInt32(), mask);              // 0 0  | 0 r'
+                    var F1 = Sse2.And(E1.AsInt32(), mask);
+                    var I = Sse2.PackSignedSaturate(F0, F1).AsUInt16();
+                    for (int i = 0; i < 8; ++i) ++Unsafe.Add(ref h, I.GetElement(i));
+                }
+            }
+            x0 = spanEnd;
+        }
+        if (x0 < tileWidth)
+        {
+            int left = tileWidth - x0;
+            off += x0;
+            while (tileHeight-- > 0)
+            {
+                for (int x = 0; x < left; ++x) ++histo[TransformColorRed((byte)greenToRed, argb[off + x])];
+                off += stride;
+            }
         }
     }
 
     internal static void CollectColorBlueTransforms(uint[] argb, int off, int stride, int tileWidth, int tileHeight,
         int greenToBlue, int redToBlue, uint[] histo)
     {
-        while (tileHeight-- > 0)
+        int x0 = 0;
+        if (Sse2.IsSupported && tileWidth >= 8)
         {
-            for (int x = 0; x < tileWidth; ++x)
-                ++histo[TransformColorBlue((byte)greenToBlue, (byte)redToBlue, argb[off + x])];
-            off += stride;
+            // CollectColorBlueTransforms_SSE2
+            var multsR = MkCst16(Cst5b(redToBlue), 0);
+            var multsG = MkCst16(0, Cst5b(greenToBlue));
+            var maskG = Vector128.Create(0x00ff00);  // green mask
+            var maskB = Vector128.Create(0x0000ff);  // blue mask
+            ref uint h = ref MemoryMarshal.GetArrayDataReference(histo);
+            ref uint a = ref MemoryMarshal.GetArrayDataReference(argb);
+            int spanEnd = tileWidth & ~7;
+            for (int y = 0; y < tileHeight; ++y)
+            {
+                int src = off + y * stride;
+                for (int x = 0; x < spanEnd; x += 8)
+                {
+                    var in0 = Unsafe.ReadUnaligned<Vector128<int>>(ref Unsafe.As<uint, byte>(ref Unsafe.Add(ref a, src + x)));
+                    var in1 = Unsafe.ReadUnaligned<Vector128<int>>(ref Unsafe.As<uint, byte>(ref Unsafe.Add(ref a, src + x + 4)));
+                    var A0 = Sse2.ShiftLeftLogical(in0.AsInt16(), 8);   // r 0  | b 0
+                    var A1 = Sse2.ShiftLeftLogical(in1.AsInt16(), 8);
+                    var B0 = Sse2.And(in0, maskG);                      // 0 0  | g 0
+                    var B1 = Sse2.And(in1, maskG);
+                    var C0 = Sse2.MultiplyHigh(A0, multsR);             // x db | 0 0
+                    var C1 = Sse2.MultiplyHigh(A1, multsR);
+                    var D0 = Sse2.MultiplyHigh(B0.AsInt16(), multsG);   // 0 0  | x db
+                    var D1 = Sse2.MultiplyHigh(B1.AsInt16(), multsG);
+                    var E0 = Sse2.Subtract(in0.AsByte(), D0.AsByte());  // x x  | x b'
+                    var E1 = Sse2.Subtract(in1.AsByte(), D1.AsByte());
+                    var F0 = Sse2.ShiftRightLogical(C0.AsInt32(), 16);  // 0 0  | x db
+                    var F1 = Sse2.ShiftRightLogical(C1.AsInt32(), 16);
+                    var G0 = Sse2.Subtract(E0, F0.AsByte());            // 0 0  | x b'
+                    var G1 = Sse2.Subtract(E1, F1.AsByte());
+                    var H0 = Sse2.And(G0.AsInt32(), maskB);             // 0 0  | 0 b
+                    var H1 = Sse2.And(G1.AsInt32(), maskB);
+                    var I = Sse2.PackSignedSaturate(H0, H1).AsUInt16(); // 0 b' | 0 b'
+                    for (int i = 0; i < 8; ++i) ++Unsafe.Add(ref h, I.GetElement(i));
+                }
+            }
+            x0 = spanEnd;
+        }
+        if (x0 < tileWidth)
+        {
+            int left = tileWidth - x0;
+            off += x0;
+            while (tileHeight-- > 0)
+            {
+                for (int x = 0; x < left; ++x)
+                    ++histo[TransformColorBlue((byte)greenToBlue, (byte)redToBlue, argb[off + x])];
+                off += stride;
+            }
         }
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal static int VectorMismatch(uint[] a, int aOff, uint[] b, int bOff, int length)
-    {
-        int matchLen = 0;
-        while (matchLen < length && a[aOff + matchLen] == b[bOff + matchLen]) ++matchLen;
-        return matchLen;
-    }
+    internal static int VectorMismatch(uint[] a, int aOff, uint[] b, int bOff, int length) =>
+        a.AsSpan(aOff, length).CommonPrefixLength(b.AsSpan(bOff, length));
 
     /// <summary>VP8LBundleColorMap: packs 1, 2, 4 or 8 palette indices per pixel.</summary>
     internal static void BundleColorMap(byte[] row, int width, int xbits, uint[] dst, int dstOff)
