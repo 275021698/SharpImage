@@ -1373,12 +1373,17 @@ public static class WebpCoder
     // Huffman Code Length Builder
     // ═══════════════════════════════════════════════════════════════════
 
-    private static int[] ComputeCodeLengths(long[] frequencies, int alphabetSize, int maxLength)
+    /// <summary>
+    /// Huffman code lengths of at most <paramref name="maxLength"/> bits. As libwebp's GenerateOptimalTree
+    /// (huffman_encode.c): when the optimal tree is too deep it is rebuilt with every used symbol's count raised to at
+    /// least count_min (doubled each try), so the lengths always come from a real Huffman tree — a complete code, which
+    /// a VP8L decoder requires (an over- or under-full code is rejected).
+    /// </summary>
+    internal static int[] ComputeCodeLengths(long[] frequencies, int alphabetSize, int maxLength)
     {
-        int[] lengths = new int[alphabetSize];
-        int nonZero = 0;
-        int lastSym = 0;
-        for (int i = 0;i < Math.Min(frequencies.Length, alphabetSize);i++)
+        int n = Math.Min(frequencies.Length, alphabetSize);
+        int nonZero = 0, lastSym = 0;
+        for (int i = 0; i < n; i++)
         {
             if (frequencies[i] > 0)
             {
@@ -1387,6 +1392,7 @@ public static class WebpCoder
             }
         }
 
+        var lengths = new int[alphabetSize];
         if (nonZero == 0)
         {
             lengths[0] = 1;
@@ -1398,121 +1404,86 @@ public static class WebpCoder
             return lengths;
         }
 
-        // Build Huffman tree via sorted queue
-        int totalNodes = nonZero * 2;
-        long[] nodeFreq = new long[totalNodes];
-        int[] nodeLeft = new int[totalNodes];
-        int[] nodeRight = new int[totalNodes];
-        int[] nodeSym = new int[totalNodes];
-        Array.Fill(nodeLeft, -1);
-        Array.Fill(nodeRight, -1);
-        Array.Fill(nodeSym, -1);
-        int nCount = 0;
-
-        for (int i = 0;i < Math.Min(frequencies.Length, alphabetSize);i++)
+        var counts = new long[n];
+        for (long countMin = 1; ; countMin *= 2)
         {
-            if (frequencies[i] > 0)
+            for (int i = 0; i < n; i++)
             {
-                nodeFreq[nCount] = frequencies[i];
-                nodeSym[nCount] = i;
-                nCount++;
+                counts[i] = frequencies[i] > 0 ? Math.Max(frequencies[i], countMin) : 0;
+            }
+            Array.Clear(lengths);
+            if (HuffmanDepths(counts, n, lengths) <= maxLength)
+            {
+                return lengths;
+            }
+        }
+    }
+
+    // The optimal (unlimited) Huffman code lengths of the used symbols; returns the deepest length.
+    private static int HuffmanDepths(long[] counts, int n, int[] lengths)
+    {
+        int used = 0;
+        for (int i = 0; i < n; i++)
+        {
+            if (counts[i] > 0)
+            {
+                used++;
             }
         }
 
-        var queue = new List<int>(nCount);
-        for (int i = 0;i < nCount;i++)
+        // nodes [0, used) are leaves, the rest internal; parent links give each leaf's depth
+        var weight = new long[2 * used];
+        var parent = new int[2 * used];
+        var symbol = new int[used];
+        int leaf = 0;
+        for (int i = 0; i < n; i++)
         {
-            queue.Add(i);
-        }
-
-        queue.Sort((a, b) => nodeFreq[a].CompareTo(nodeFreq[b]));
-
-        while (queue.Count > 1)
-        {
-            int a = queue[0];
-            queue.RemoveAt(0);
-            int b = queue[0];
-            queue.RemoveAt(0);
-            int parent = nCount++;
-            nodeFreq[parent] = nodeFreq[a] + nodeFreq[b];
-            nodeLeft[parent] = a;
-            nodeRight[parent] = b;
-
-            int ins = 0;
-            while (ins < queue.Count && nodeFreq[queue[ins]] <= nodeFreq[parent])
+            if (counts[i] > 0)
             {
-                ins++;
-            }
-
-            queue.Insert(ins, parent);
-        }
-
-        void ComputeDepth(int node, int depth)
-        {
-            if (nodeLeft[node] == -1)
-            {
-                lengths[nodeSym[node]] = depth;
-                return;
-            }
-            ComputeDepth(nodeLeft[node], depth + 1);
-            ComputeDepth(nodeRight[node], depth + 1);
-        }
-
-        ComputeDepth(queue[0], 0);
-
-        // Limit code lengths
-        bool needsLimit = false;
-        for (int i = 0;i < alphabetSize;i++)
-        {
-            if (lengths[i] > maxLength)
-            {
-                needsLimit = true;
-                break;
+                weight[leaf] = counts[i];
+                symbol[leaf] = i;
+                leaf++;
             }
         }
 
-        if (needsLimit)
+        // two-queue merge: leaves sorted by weight (ties by symbol), internal nodes created in non-decreasing order
+        var order = new int[used];
+        for (int i = 0; i < used; i++)
         {
-            for (int i = 0;i < alphabetSize;i++)
+            order[i] = i;
+        }
+        Array.Sort(order, (a, b) => weight[a] != weight[b] ? weight[a].CompareTo(weight[b]) : symbol[a].CompareTo(symbol[b]));
+        int li = 0, qi = used, next = used;
+        int Pop()
+        {
+            if (li < used && (qi >= next || weight[order[li]] <= weight[qi]))
             {
-                if (lengths[i] > maxLength)
-                {
-                    lengths[i] = maxLength;
-                }
+                return order[li++];
             }
-
-            // Adjust for Kraft inequality
-            while (true)
-            {
-                long kraft = 0;
-                for (int i = 0;i < alphabetSize;i++)
-                {
-                    if (lengths[i] > 0)
-                    {
-                        kraft += 1L << (maxLength - lengths[i]);
-                    }
-                }
-
-                long target = 1L << maxLength;
-                if (kraft <= target)
-                {
-                    break;
-                }
-
-                for (int i = 0;i < alphabetSize && kraft > target;i++)
-                {
-                    while (lengths[i] > 0 && lengths[i] < maxLength && kraft > target)
-                    {
-                        kraft -= 1L << (maxLength - lengths[i]);
-                        lengths[i]++;
-                        kraft += 1L << (maxLength - lengths[i]);
-                    }
-                }
-                break;
-            }
+            return qi++;
+        }
+        while (next < 2 * used - 1)
+        {
+            int a = Pop(), b = Pop();
+            weight[next] = weight[a] + weight[b];
+            parent[a] = next;
+            parent[b] = next;
+            next++;
         }
 
-        return lengths;
+        int root = 2 * used - 2;
+        var depth = new int[2 * used - 1];
+        int maxDepth = 0;
+        for (int node = root - 1; node >= 0; node--)
+        {
+            depth[node] = depth[parent[node]] + 1;
+        }
+        for (int i = 0; i < used; i++)
+        {
+            lengths[symbol[i]] = depth[i];
+            maxDepth = Math.Max(maxDepth, depth[i]);
+        }
+        return maxDepth;
     }
 
     private static int[] BuildCanonicalCodes(int[] lengths)
