@@ -84,6 +84,16 @@ public static class JxlCoder
     public static byte[] Encode(ImageFrame image, JxlLosslessEffort effort) => Jxl.JxlEncoder.EncodeLossless(image, effort);
 
     /// <summary>
+    /// Losslessly recompresses a JPEG into a JPEG XL file, exactly as libjxl's <c>cjxl</c> does by default for JPEG
+    /// input: the JPEG's own DCT coefficients become the JXL image and a jbrd box keeps everything needed to
+    /// rebuild the original file byte for byte (<c>djxl image.jxl image.jpg</c>). The output is byte-identical to
+    /// cjxl 0.12 at its default settings. Throws <see cref="NotSupportedException"/> for a JPEG that cannot be
+    /// recompressed (arithmetic coding, CMYK, 12-bit, unusual sampling, corrupt data); encode its decoded pixels
+    /// instead, as cjxl does.
+    /// </summary>
+    public static byte[] EncodeFromJpeg(byte[] jpeg) => Jxl.Lj.LjJpegTranscoder.Transcode(jpeg);
+
+    /// <summary>
     /// Encodes an animated image sequence as a single multi-frame lossless JPEG XL codestream. Each frame
     /// carries its own duration (from <see cref="ImageFrame.Delay"/>, centiseconds); the metadata holds the
     /// loop count. A one-frame sequence produces an ordinary still image.
@@ -234,30 +244,51 @@ public static class JxlCoder
             return data;
         }
 
-        // Parse container boxes to find the jxlc (codestream) box.
+        // Parse container boxes: the codestream is one jxlc box, or split over jxlp boxes (each starting with a
+        // 4-byte part index) that are concatenated in file order — cjxl splits it whenever it writes jbrd / Exif.
         int pos = 0;
+        List<byte[]>? parts = null;
         while (pos + 8 <= data.Length)
         {
-            uint boxLen = BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(pos));
+            long boxLen = BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(pos));
             string boxType = System.Text.Encoding.ASCII.GetString(data, pos + 4, 4);
             int headerSize = 8;
 
             if (boxLen == 1 && pos + 16 <= data.Length)
             {
                 headerSize = 16;
-                boxLen = (uint)BinaryPrimitives.ReadUInt64BigEndian(data.AsSpan(pos + 8));
+                boxLen = (long)BinaryPrimitives.ReadUInt64BigEndian(data.AsSpan(pos + 8));
             }
             else if (boxLen == 0)
             {
-                boxLen = (uint)(data.Length - pos);
+                boxLen = data.Length - pos;
             }
 
-            if (boxType == "jxlc" || boxType == "jxlp")
+            if (boxLen < headerSize || pos + boxLen > data.Length)
+            {
+                throw new InvalidDataException("Truncated JXL container box");
+            }
+
+            if (boxType == "jxlc")
             {
                 return data.AsSpan(pos + headerSize, (int)boxLen - headerSize).ToArray();
             }
 
+            if (boxType == "jxlp" && boxLen >= headerSize + 4)
+            {
+                (parts ??= []).Add(data.AsSpan(pos + headerSize + 4, (int)boxLen - headerSize - 4).ToArray());
+                if ((BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(pos + headerSize)) & 0x80000000u) != 0)
+                {
+                    break;   // the last part
+                }
+            }
+
             pos += (int)boxLen;
+        }
+
+        if (parts != null)
+        {
+            return parts.Count == 1 ? parts[0] : parts.SelectMany(p => p).ToArray();
         }
 
         throw new InvalidDataException("No codestream found in JXL container");
