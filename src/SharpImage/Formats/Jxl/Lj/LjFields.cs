@@ -216,6 +216,9 @@ internal static class LjFields
         bundle.VisitFields(new LjReadVisitor(readBits));
     }
 
+    /// <summary>Bundle::Read without first applying defaults (for bundles such as JPEGData that are not Init'ed).</summary>
+    public static void ReadRaw(ILjBundle bundle, LjBitReader br) => bundle.VisitFields(new LjReadVisitor(br.AsReadFunc()));
+
     /// <summary>Bundle::Read from a bit reader.</summary>
     public static void ReadInto(ILjBundle bundle, LjBitReader br) => Read(bundle, br.AsReadFunc());
 

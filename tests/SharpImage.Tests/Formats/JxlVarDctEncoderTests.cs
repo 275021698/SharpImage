@@ -1425,9 +1425,15 @@ public class JxlVarDctEncoderTests
 
         frame.IccProfile = icc;
         byte[] cs = SharpImage.Formats.JxlCoder.EncodeLossy(frame, quality: 90, effort: 7);
+
+        // The profile is stored in the codestream exactly. Decoded XYB pixels are rendered to sRGB (as libjxl does
+        // without a CMS), so the decoded frame does not carry the original profile.
+        var lj = SharpImage.Formats.Jxl.Lj.LjDecoder.Decode(cs, 1);
+        await Assert.That(lj.Icc).IsNotNull();
+        await Assert.That(lj.Icc!.AsSpan().SequenceEqual(icc)).IsTrue();
         ImageFrame dec = SharpImage.Formats.JxlCoder.Decode(cs);
-        await Assert.That(dec.IccProfile).IsNotNull();
-        await Assert.That(dec.IccProfile!.AsSpan().SequenceEqual(icc)).IsTrue();
+        await Assert.That(dec.IccProfile).IsNull();
+        await Assert.That(dec.Columns).IsEqualTo(w);
 
         if (!string.IsNullOrEmpty(dir) && System.IO.Directory.Exists(dir))
         {

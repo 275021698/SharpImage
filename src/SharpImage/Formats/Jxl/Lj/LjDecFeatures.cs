@@ -1007,10 +1007,4 @@ internal sealed partial class LjFrameDecoder
 
     private static float BitsToFloat(uint bits) => BitConverter.UInt32BitsToSingle((bits >> 9) | 0x3F800000u);
 
-    private void InitJpegOutput() => throw new NotSupportedException();
-
-    private void SetJpegQuantTables() => throw new NotSupportedException();
-
-    private void WriteJpegBlock(int raw, int bx, int by, int[] sbx, int[] sby, int[] hshift, int[] vshift, LjRect[] r, int absTx, int[] qblock, int size) =>
-        throw new NotSupportedException();
 }

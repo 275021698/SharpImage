@@ -287,6 +287,7 @@ internal sealed class LjRenderPipeline
                 channelData[c].ShrinkTo(cx + (2 * Xo), cy + (2 * Xo));
             }
 
+            LjProf.Mark("  stage " + stage.GetType().Name);
             if (stage.SwitchToImageDimensions)
             {
                 stage.GetImageDimensions(out int imageXsize, out int imageYsize, out int x0, out int y0);

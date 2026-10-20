@@ -47,7 +47,7 @@ internal sealed class LjDecodedImage
 internal static class LjDecoder
 {
     /// <summary>Decodes a bare JPEG XL codestream. <paramref name="maxFrames"/> limits the displayed frames returned.</summary>
-    public static LjDecodedImage Decode(byte[] cs, int maxFrames = int.MaxValue, LjColorEncoding? desired = null)
+    public static LjDecodedImage Decode(byte[] cs, int maxFrames = int.MaxValue, LjColorEncoding? desired = null, bool preferSrgb = false)
     {
         if (cs.Length < 2 || cs[0] != 0xFF || cs[1] != 0x0A)
         {
@@ -76,6 +76,10 @@ internal static class LjDecoder
         if (desired != null)
         {
             st.Output.SetColorEncoding(desired);
+        }
+        else if (preferSrgb && st.Meta.XybEncoded && MapColorspace(st.Meta.ColorEncoding) == null)
+        {
+            st.Output.SetColorEncoding(LjCe.Srgb(LjCe.IsGray(st.Meta.ColorEncoding)));
         }
         int pos = 2 + (int)(br.TotalBitsConsumed / 8);
         bool preview = st.Meta.HavePreview;
@@ -115,6 +119,83 @@ internal static class LjDecoder
         }
 
         return img;
+    }
+
+    /// <summary>The SharpImage colour space an enumerated encoding corresponds to, or null when there is none.</summary>
+    public static Core.ColorspaceType? MapColorspace(LjColorEncoding c)
+    {
+        if (c.WantIcc || c.WhitePoint != LjColorEncoding.WpD65 || c.ColorSpace == LjColorEncoding.CsXyb || c.ColorSpace == LjColorEncoding.CsUnknown)
+        {
+            return null;
+        }
+
+        bool srgbTf = LjCe.TfIsSrgb(c), linear = LjCe.TfIsLinear(c);
+        if (LjCe.IsGray(c))
+        {
+            return srgbTf ? Core.ColorspaceType.Gray : linear ? Core.ColorspaceType.LinearGray : null;
+        }
+
+        if (c.Primaries == LjColorEncoding.PrSrgb)
+        {
+            return srgbTf ? Core.ColorspaceType.SRGB : linear ? Core.ColorspaceType.ScRGB : null;
+        }
+
+        if (c.Primaries == LjColorEncoding.PrP3 && srgbTf)
+        {
+            return Core.ColorspaceType.DisplayP3;
+        }
+
+        // Adobe RGB (1998): its primaries with a 563/256 gamma.
+        if (c.Primaries == LjColorEncoding.PrCustom && c.Red.X == 640000 && c.Red.Y == 330000 && c.Green.X == 210000 && c.Green.Y == 710000 &&
+            c.Blue.X == 150000 && c.Blue.Y == 60000 && c.Tf.HaveGamma)
+        {
+            return Core.ColorspaceType.Adobe98;
+        }
+
+        return null;
+    }
+
+    /// <summary>Decodes the first frame's quantized DCT coefficients into <paramref name="jpg"/> (JPEG reconstruction).</summary>
+    public static void DecodeToJpeg(byte[] cs, LjJpegData jpg)
+    {
+        if (cs.Length < 2 || cs[0] != 0xFF || cs[1] != 0x0A)
+        {
+            throw LjDec.Fail("invalid signature");
+        }
+
+        var st = new LjDecoderState();
+        var br = new LjBitReader(cs, 2, cs.Length - 2);
+        LjFields.ReadInto(st.Size, br);
+        LjFields.ReadInto(st.Meta, br);
+        st.Transform.NonserializedXybEncoded = st.Meta.XybEncoded;
+        LjFields.ReadInto(st.Transform, br);
+        if (st.Meta.ColorEncoding.WantIcc)
+        {
+            st.Meta.ColorEncoding.Icc = LjIccDecoder.Read(br);
+        }
+
+        br.JumpToByteBoundary();
+        st.Output.SetFromMetadata(st.Meta, st.Transform);
+        LjJpegRecon.SetIcc(st.Meta.ColorEncoding.WantIcc ? st.Meta.ColorEncoding.Icc : null, jpg);
+        int pos = 2 + (int)(br.TotalBitsConsumed / 8);
+        bool preview = st.Meta.HavePreview;
+        while (pos < cs.Length)
+        {
+            var fd = new LjFrameDecoder(st);
+            long frameSize = fd.InitFrame(cs, pos, preview);
+            if (preview)
+            {
+                pos += (int)frameSize;
+                preview = false;
+                continue;
+            }
+
+            fd.JpegData = jpg;
+            fd.DecodeSections(cs, pos);
+            return;
+        }
+
+        throw LjDec.Fail("no frame");
     }
 
     private static LjDecodedFrame MakeOutput(LjDecoderState st, LjFrameDecoder fd)

@@ -199,15 +199,20 @@ internal sealed partial class LjFrameDecoder
         LjBitReader AcGlobal() => single ? readers[0] : readers[1 + Fd.NumDcGroups];
         LjBitReader AcGroup(int g, int pass) => single ? readers[0] : readers[2 + Fd.NumDcGroups + (pass * Fd.NumGroups) + g];
 
+        LjProf.Mark("frame start");
         ProcessDcGlobal(DcGlobal());
+        LjProf.Mark("dc global");
         for (int g = 0; g < Fd.NumDcGroups; g++)
         {
             ProcessDcGroup(g, DcGroup(g));
         }
 
+        LjProf.Mark("dc groups");
         PreparePipeline();
         FinalizeDc();
+        LjProf.Mark("finalize dc");
         ProcessAcGlobal(AcGlobal());
+        LjProf.Mark("ac global");
         for (int g = 0; g < Fd.NumGroups; g++)
         {
             var passReaders = new LjBitReader[numPasses];
@@ -232,8 +237,11 @@ internal sealed partial class LjFrameDecoder
             return;
         }
 
+        LjProf.Mark("ac groups");
         FinalizeModular();
+        LjProf.Mark("finalize modular");
         pipeline.Run();
+        LjProf.Mark("pipeline");
         if (Fh.CanBeReferenced)
         {
             LjReferenceFrame rf = st.RefFrames[Fh.SaveAsReference];
@@ -1076,6 +1084,8 @@ internal sealed partial class LjFrameDecoder
                 int absTx = tx + (blockRect.X0 / 8);
                 sbyte ytox = cmap.YtoxMap.Data[cmap.YtoxMap.Row(ty) + absTx];
                 sbyte ytob = cmap.YtobMap.Data[cmap.YtobMap.Row(ty) + absTx];
+                currentYtox = ytox;
+                currentYtob = ytob;
                 // YtoXRatio / YtoBRatio inlined into AVX2 code: clang contracts base + factor * scale into an FMA.
                 float xCcMul = MathF.FusedMultiplyAdd(ytox, cmap.ColorScale, cmap.BaseCorrelationX);
                 float bCcMul = MathF.FusedMultiplyAdd(ytob, cmap.ColorScale, cmap.BaseCorrelationB);
