@@ -40,7 +40,7 @@ public sealed class WebpLossyOptions
     public int QMin { get; set; }
     public int QMax { get; set; } = 100;
 
-    /// <summary>Bit 0: segment smoothing, bit 1: pseudo-random dithering (cwebp -pre). Default 0.</summary>
+    /// <summary>Bit 0: segment smoothing, bit 1: pseudo-random dithering, bit 2: sharp YUV (cwebp -pre). Default 0.</summary>
     public int Preprocessing { get; set; }
 
     /// <summary>log2 of the number of token partitions 0..3 (cwebp -partitions). Default 0.</summary>
@@ -60,6 +60,9 @@ public sealed class WebpLossyOptions
 
     /// <summary>Alpha quality 0..100, below 100 the levels are quantized (cwebp -alpha_q). Default 100.</summary>
     public int AlphaQuality { get; set; } = 100;
+
+    /// <summary>Iterative sharp RGB->YUV conversion, slower but sharper chroma (cwebp -sharp_yuv). Default false.</summary>
+    public bool UseSharpYuv { get; set; }
 
     /// <summary>Keep the RGB under fully transparent pixels (cwebp -exact). Default false.</summary>
     public bool Exact { get; set; }
@@ -81,7 +84,7 @@ public sealed class WebpLossyOptions
         Check(FilterType >= 0 && FilterType <= 1, nameof(FilterType));
         Check(Pass >= 1 && Pass <= 10, nameof(Pass));
         Check(QMin >= 0 && QMax <= 100 && QMin <= QMax, nameof(QMin));
-        Check(Preprocessing >= 0 && Preprocessing <= 3, nameof(Preprocessing));
+        Check(Preprocessing >= 0 && Preprocessing <= 7, nameof(Preprocessing));
         Check(Partitions >= 0 && Partitions <= 3, nameof(Partitions));
         Check(PartitionLimit >= 0 && PartitionLimit <= 100, nameof(PartitionLimit));
         Check(AlphaCompression >= 0 && AlphaCompression <= 1, nameof(AlphaCompression));
@@ -323,14 +326,22 @@ internal sealed partial class Vp8Encoder
         config.Validate();
         if (width <= 0 || height <= 0 || width > 16383 || height > 16383)
             throw new ArgumentException("WebP dimensions must be in 1..16383.");
-        float dithering = 0f;
-        if ((config.Preprocessing & 2) != 0)
+        Vp8EncPicture pic;
+        if (config.UseSharpYuv || (config.Preprocessing & 4) != 0)
         {
-            float x = config.Quality / 100f;
-            float x2 = x * x;
-            dithering = 1.0f + (0.5f - 1.0f) * x2 * x2;
+            pic = Vp8EncPicture.FromArgb(argb, width, height, 0f, true);
         }
-        var pic = Vp8EncPicture.FromArgb(argb, width, height, dithering);
+        else
+        {
+            float dithering = 0f;
+            if ((config.Preprocessing & 2) != 0)
+            {
+                float x = config.Quality / 100f;
+                float x2 = x * x;
+                dithering = 1.0f + (0.5f - 1.0f) * x2 * x2;
+            }
+            pic = Vp8EncPicture.FromArgb(argb, width, height, dithering, false);
+        }
         if (!config.Exact) pic.CleanupTransparentArea();
         var enc = new Vp8Encoder(config, pic);
         enc.Analyze();

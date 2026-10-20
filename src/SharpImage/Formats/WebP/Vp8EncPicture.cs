@@ -244,14 +244,25 @@ internal sealed class Vp8EncPicture
     }
 
     /// <summary>
-    /// WebPPictureImportRGBA (lossy, use_argb = 0) / WebPPictureARGBToYUVADithered: ImportYUVAFromRGBA on a
-    /// 0xAARRGGBB picture (width x height, stride = width).
+    /// WebPPictureImportRGBA (lossy, use_argb = 0) / WebPPictureARGBToYUVADithered / WebPPictureSharpARGBToYUVA:
+    /// ImportYUVAFromRGBA on a 0xAARRGGBB picture (width x height, stride = width).
     /// </summary>
-    public static Vp8EncPicture FromArgb(uint[] argb, int width, int height, float dithering)
+    public static Vp8EncPicture FromArgb(uint[] argb, int width, int height, float dithering, bool useIterativeConversion)
     {
         bool hasAlpha = false;
         for (int i = 0; i < width * height && !hasAlpha; ++i) hasAlpha = (argb[i] >> 24) != 0xff;
         var pic = new Vp8EncPicture(width, height, hasAlpha);
+
+        const int kMinDimensionIterativeConversion = 4;
+        if (width < kMinDimensionIterativeConversion || height < kMinDimensionIterativeConversion)
+            useIterativeConversion = false;
+        if (useIterativeConversion)
+        {
+            // sharp YUV (PreprocessARGB -> SharpYuvConvert)
+            SharpYuv.Convert(argb, width, height, pic.Y, pic.YStride, pic.U, pic.V, pic.UvStride);
+            if (hasAlpha) ExtractAlpha(argb, 0, width, width, height, pic.A!, 0, pic.AStride);
+            return pic;
+        }
 
         int uvWidth = (width + 1) >> 1;
         var tmpRgb = new ushort[4 * uvWidth];
