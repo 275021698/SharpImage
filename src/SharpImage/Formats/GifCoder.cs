@@ -305,63 +305,128 @@ public static class GifCoder
     }
 
     /// <summary>
-    /// Simple color quantization: builds a 256-color palette using frequency-based selection. Maps each pixel to its
-    /// nearest palette color. If the frame has alpha, index 0 is reserved for transparent pixels.
+    /// Builds the frame's palette and index map. Pixels with alpha below one half are transparent (index 0, reserved
+    /// when the frame has any). When the opaque colours fit in the palette they are kept exactly; otherwise the palette
+    /// is a median cut of the opaque pixels and they are mapped with Floyd-Steinberg error diffusion.
     /// Returns the number of palette entries used and the transparent index (-1 if none).
     /// </summary>
     private static (int colorCount, int transparentIndex) BuildPaletteWithAlpha(
         ImageFrame image, int width, int height, byte[] palette, byte[] indices)
     {
-        bool hasAlpha = image.HasAlpha;
         int channels = image.NumberOfChannels;
-        int nextIndex = hasAlpha ? 1 : 0; // Reserve index 0 for transparency
-        int transparentIdx = -1;
-
-        var colorMap = new Dictionary<int, int>(256);
-
+        bool hasAlpha = image.HasAlpha;
+        bool gray = channels - (hasAlpha ? 1 : 0) == 1;
+        int n = width * height;
+        var rgb = new byte[n * 3];
+        var transparent = new bool[n];
+        bool anyTransparent = false;
         for (int y = 0; y < height; y++)
         {
             var row = image.GetPixelRow(y);
-
             for (int x = 0; x < width; x++)
             {
-                int offset = x * channels;
-
-                // Check transparency
-                if (hasAlpha && channels > 3 && row[offset + 3] == 0)
+                int o = x * channels, p = y * width + x;
+                if (hasAlpha && row[o + channels - 1] < 32768)
                 {
-                    indices[y * width + x] = 0;
-                    transparentIdx = 0;
+                    transparent[p] = true;
+                    anyTransparent = true;
                     continue;
                 }
-
-                byte r = Quantum.ScaleToByte(row[offset]);
-                byte g = Quantum.ScaleToByte(row[offset + 1]);
-                byte b = Quantum.ScaleToByte(row[offset + 2]);
-                int rgb = (r << 16) | (g << 8) | b;
-
-                if (!colorMap.TryGetValue(rgb, out int palIndex))
-                {
-                    if (nextIndex >= 256)
-                    {
-                        palIndex = FindNearestColor(palette, nextIndex, r, g, b);
-                    }
-                    else
-                    {
-                        palIndex = nextIndex;
-                        palette[palIndex * 3] = r;
-                        palette[palIndex * 3 + 1] = g;
-                        palette[palIndex * 3 + 2] = b;
-                        colorMap[rgb] = palIndex;
-                        nextIndex++;
-                    }
-                }
-
-                indices[y * width + x] = (byte)palIndex;
+                rgb[p * 3] = Quantum.ScaleToByte(row[o]);
+                rgb[p * 3 + 1] = Quantum.ScaleToByte(gray ? row[o] : row[o + 1]);
+                rgb[p * 3 + 2] = Quantum.ScaleToByte(gray ? row[o] : row[o + 2]);
             }
         }
 
-        return (Math.Max(nextIndex, 2), transparentIdx);
+        int first = anyTransparent ? 1 : 0;          // index 0 is the transparent colour
+        int limit = 256 - first;
+        int transparentIdx = anyTransparent ? 0 : -1;
+        if (anyTransparent) palette[0] = palette[1] = palette[2] = 0;
+
+        // Exact palette when the opaque colours fit.
+        var colorMap = new Dictionary<int, int>(limit);
+        bool fits = true;
+        for (int p = 0; p < n && fits; p++)
+        {
+            if (transparent[p]) continue;
+            int key = (rgb[p * 3] << 16) | (rgb[p * 3 + 1] << 8) | rgb[p * 3 + 2];
+            if (!colorMap.ContainsKey(key))
+            {
+                if (colorMap.Count == limit) fits = false;
+                else colorMap[key] = first + colorMap.Count;
+            }
+        }
+        if (fits)
+        {
+            foreach (var (key, idx) in colorMap)
+            {
+                palette[idx * 3] = (byte)(key >> 16);
+                palette[idx * 3 + 1] = (byte)(key >> 8);
+                palette[idx * 3 + 2] = (byte)key;
+            }
+            for (int p = 0; p < n; p++)
+                indices[p] = transparent[p] ? (byte)0 : (byte)colorMap[(rgb[p * 3] << 16) | (rgb[p * 3 + 1] << 8) | rgb[p * 3 + 2]];
+            return (Math.Max(first + colorMap.Count, 2), transparentIdx);
+        }
+
+        // Median-cut palette of the opaque pixels.
+        var opaque = new byte[n * 3];
+        int m = 0;
+        for (int p = 0; p < n; p++)
+        {
+            if (transparent[p]) continue;
+            opaque[m * 3] = rgb[p * 3];
+            opaque[m * 3 + 1] = rgb[p * 3 + 1];
+            opaque[m * 3 + 2] = rgb[p * 3 + 2];
+            m++;
+        }
+        byte[][] cut = Quantize.ColorQuantize.MedianCutPalette(opaque, m, limit);
+        int count = first + cut.Length;
+        for (int k = 0; k < cut.Length; k++)
+        {
+            palette[(first + k) * 3] = cut[k][0];
+            palette[(first + k) * 3 + 1] = cut[k][1];
+            palette[(first + k) * 3 + 2] = cut[k][2];
+        }
+
+        // Floyd-Steinberg error diffusion over the opaque pixels (errors in 1/16 units, two rows).
+        var errCur = new int[(width + 2) * 3];
+        var errNext = new int[(width + 2) * 3];
+        var nearestCache = new short[1 << 18];   // 6 bits per channel -> nearest index + 1
+        byte[] cutPalette = palette[(first * 3)..(count * 3)];
+        for (int y = 0; y < height; y++)
+        {
+            Array.Clear(errNext);
+            for (int x = 0; x < width; x++)
+            {
+                int p = y * width + x;
+                if (transparent[p])
+                {
+                    indices[p] = 0;
+                    continue;
+                }
+                int e = (x + 1) * 3;
+                int r = Math.Clamp(rgb[p * 3] + (errCur[e] >> 4), 0, 255);
+                int g = Math.Clamp(rgb[p * 3 + 1] + (errCur[e + 1] >> 4), 0, 255);
+                int b = Math.Clamp(rgb[p * 3 + 2] + (errCur[e + 2] >> 4), 0, 255);
+                int key = ((r >> 2) << 12) | ((g >> 2) << 6) | (b >> 2);
+                int idx = nearestCache[key] - 1;
+                if (idx < 0)
+                {
+                    idx = first + FindNearestColor(cutPalette, cut.Length, (byte)r, (byte)g, (byte)b);
+                    nearestCache[key] = (short)(idx + 1);
+                }
+                indices[p] = (byte)idx;
+                int dr = r - palette[idx * 3], dg = g - palette[idx * 3 + 1], db = b - palette[idx * 3 + 2];
+                // 7/16 right, 3/16 below-left, 5/16 below, 1/16 below-right
+                errCur[e + 3] += dr * 7; errCur[e + 4] += dg * 7; errCur[e + 5] += db * 7;
+                errNext[e - 3] += dr * 3; errNext[e - 2] += dg * 3; errNext[e - 1] += db * 3;
+                errNext[e] += dr * 5; errNext[e + 1] += dg * 5; errNext[e + 2] += db * 5;
+                errNext[e + 3] += dr; errNext[e + 4] += dg; errNext[e + 5] += db;
+            }
+            (errCur, errNext) = (errNext, errCur);
+        }
+        return (Math.Max(count, 2), transparentIdx);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

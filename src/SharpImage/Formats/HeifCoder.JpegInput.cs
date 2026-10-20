@@ -48,6 +48,10 @@ public static partial class HeifCoder
         var o = WithDefaultQuality((options ?? new AvifEncodeOptions()).Clone());
         using var scope = new EncoderScope(o, allIntra: !o.Progressive && o.Layers == null);
         var image = JpegCoder.Read(new MemoryStream(jpeg));
+        // avifenc reads JPEGs as RGB through libjpeg, which cannot convert CMYK / YCCK: it rejects them, and so do we
+        // (callers fall back to encoding converted pixels).
+        if (image.Colorspace == SharpImage.Core.ColorspaceType.CMYK)
+            throw new NotSupportedException("CMYK / YCCK JPEGs cannot be read as avifenc reads JPEG input.");
         if (ignoreIccProfile)
         {
             image.IccProfile = null;

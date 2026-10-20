@@ -1254,10 +1254,12 @@ public static class PngCoder
 
         // Determine output format
         byte colorType = hasAlpha ? ColorTypeRgba : ColorTypeRgb;
-        byte bitDepth = 8; // Write as 8-bit for maximum compatibility
+        // 16-bit when any sample is not an exact 8-bit value (16-bit sources stay 16-bit), else 8-bit.
+        bool deep = NeedsSixteenBits(image);
+        byte bitDepth = deep ? (byte)16 : (byte)8;
         int outputChannels = hasAlpha ? 4 : 3;
-        int rawBytesPerRow = width * outputChannels;
-        int bytesPerPixel = outputChannels;
+        int bytesPerPixel = outputChannels * (deep ? 2 : 1);
+        int rawBytesPerRow = width * bytesPerPixel;
 
         // Write PNG signature
         stream.Write(PngSignature);
@@ -1285,21 +1287,29 @@ public static class PngCoder
         WriteMetadataChunks(stream, image);
 
         // Compress and write IDAT
-        WriteIdatChunks(stream, image, width, height, outputChannels, rawBytesPerRow, bytesPerPixel);
+        WriteIdatChunks(stream, image, width, height, outputChannels, rawBytesPerRow, bytesPerPixel, deep);
 
         // Write IEND
         WriteChunk(stream, "IEND"u8, ReadOnlySpan<byte>.Empty);
     }
 
-    private static void WriteIdatChunks(Stream output, ImageFrame image, int width, int height,
-        int outputChannels, int rawBytesPerRow, int bytesPerPixel)
+    private static bool NeedsSixteenBits(ImageFrame image)
     {
-        // Compress filtered image data into memory, then write as IDAT chunks.
-        // CompressionLevel.Fastest (deflate level ~1) rather than Optimal (~6): photographic content
-        // is high-entropy and barely compresses, so Optimal spends multiples of the CPU for a few
-        // percent of size — Fastest encodes a 12MP PNG several times quicker at nearly the same size.
+        for (int y = 0; y < image.Rows; y++)
+        {
+            foreach (ushort v in image.GetPixelRow(y))
+                if (v % 257 != 0) return true;
+        }
+        return false;
+    }
+
+    private static void WriteIdatChunks(Stream output, ImageFrame image, int width, int height,
+        int outputChannels, int rawBytesPerRow, int bytesPerPixel, bool deep = false)
+    {
+        // Compress filtered image data into memory, then write as IDAT chunks, at zlib's default level (6) like
+        // libpng: the fastest level made screenshots and graphics larger than their source PNGs.
         using var compressedStream = new MemoryStream();
-        using (var zlibStream = new ZLibStream(compressedStream, CompressionLevel.Fastest, leaveOpen: true))
+        using (var zlibStream = new ZLibStream(compressedStream, CompressionLevel.Optimal, leaveOpen: true))
         {
             byte[] currentRow = ArrayPool<byte>.Shared.Rent(rawBytesPerRow);
             byte[] previousRow = ArrayPool<byte>.Shared.Rent(rawBytesPerRow);
@@ -1312,8 +1322,10 @@ public static class PngCoder
                 {
                     // Convert pixel row to bytes
                     var pixelRow = image.GetPixelRow(y);
-                    ConvertPixelRowToBytes(pixelRow, currentRow.AsSpan(0, rawBytesPerRow),
-                        width, outputChannels);
+                    if (deep)
+                        ConvertPixelRowToBytes16(pixelRow, currentRow.AsSpan(0, rawBytesPerRow), width, outputChannels);
+                    else
+                        ConvertPixelRowToBytes(pixelRow, currentRow.AsSpan(0, rawBytesPerRow), width, outputChannels);
 
                     // Choose best filter and apply
                     byte bestFilter = ChooseBestFilter(
@@ -1354,6 +1366,29 @@ public static class PngCoder
             int chunkSize = Math.Min(maxChunkSize, compressed.Length - offset);
             WriteChunk(output, "IDAT"u8, compressed.AsSpan(offset, chunkSize));
             offset += chunkSize;
+        }
+    }
+
+    // 16-bit big-endian samples (gray replicated to RGB, alpha last), as ConvertPixelRowToBytes does for 8-bit.
+    private static void ConvertPixelRowToBytes16(ReadOnlySpan<ushort> pixelRow, Span<byte> output, int width, int outputChannels)
+    {
+        int srcChannels = pixelRow.Length / width;
+        for (int x = 0; x < width; x++)
+        {
+            int s = x * srcChannels, d = x * outputChannels * 2;
+            bool rgb = srcChannels >= 3;
+            for (int c = 0; c < 3; c++)
+            {
+                ushort v = pixelRow[s + (rgb ? c : 0)];
+                output[d + 2 * c] = (byte)(v >> 8);
+                output[d + 2 * c + 1] = (byte)v;
+            }
+            if (outputChannels > 3)
+            {
+                ushort a = srcChannels > 3 ? pixelRow[s + 3] : srcChannels == 2 ? pixelRow[s + 1] : (ushort)65535;
+                output[d + 6] = (byte)(a >> 8);
+                output[d + 7] = (byte)a;
+            }
         }
     }
 

@@ -295,13 +295,15 @@ public static class WebpCoder
     private static uint[] ImageFrameToArgb(ImageFrame img)
     {
         int w = (int)img.Columns, h = (int)img.Rows, ch = img.NumberOfChannels;
+        bool gray = ch - (img.HasAlpha ? 1 : 0) == 1;   // gray / gray + alpha frames
         var argb = new uint[w * h];
         for (int y = 0; y < h; y++)
         {
             var row = img.GetPixelRow(y);
             for (int x = 0; x < w; x++)
             {
-                uint r = (uint)(row[x * ch] >> 8), g = (uint)(row[x * ch + 1] >> 8), b = (uint)(row[x * ch + 2] >> 8);
+                uint r = (uint)(row[x * ch] >> 8);
+                uint g = gray ? r : (uint)(row[x * ch + 1] >> 8), b = gray ? r : (uint)(row[x * ch + 2] >> 8);
                 uint a = img.HasAlpha ? (uint)(row[x * ch + ch - 1] >> 8) : 255u;
                 argb[y * w + x] = (a << 24) | (r << 16) | (g << 8) | b;
             }

@@ -220,13 +220,16 @@ public static class BmpCoder
     /// <summary>
     /// Writes an ImageFrame as a 24-bit or 32-bit uncompressed BMP.
     /// </summary>
-    public static void Write(ImageFrame image, Stream stream, bool includeAlpha = false)
+    public static void Write(ImageFrame image, Stream stream, bool includeAlpha = true)
     {
-        int bitsPerPixel = includeAlpha && image.HasAlpha ? 32 : 24;
+        // Transparent images are 32-bit BGRA with a V4 header and alpha mask (as ImageMagick and Paint.NET write
+        // them); others 24-bit with the plain V3 header.
+        bool alpha = includeAlpha && image.HasAlpha;
+        int bitsPerPixel = alpha ? 32 : 24;
         int bytesPerPixel = bitsPerPixel / 8;
         int scanlineBytes = ((int)image.Columns * bitsPerPixel + 31) / 32 * 4;
         int imageDataSize = scanlineBytes * (int)image.Rows;
-        uint dibHeaderSize = includeAlpha ? 108u : 40u; // V4 for alpha, V3 otherwise
+        uint dibHeaderSize = alpha ? 108u : 40u; // V4 for alpha, V3 otherwise
         uint pixelDataOffset = (uint)(FileHeaderSize + dibHeaderSize);
         uint fileSize = pixelDataOffset + (uint)imageDataSize;
 
@@ -245,7 +248,7 @@ public static class BmpCoder
         BinaryPrimitives.WriteInt32LittleEndian(dib.AsSpan(8), (int)image.Rows); // bottom-up
         BinaryPrimitives.WriteUInt16LittleEndian(dib.AsSpan(12), 1);             // planes
         BinaryPrimitives.WriteUInt16LittleEndian(dib.AsSpan(14), (ushort)bitsPerPixel);
-        uint compression = includeAlpha ? BiBitfields : BiRgb;
+        uint compression = alpha ? BiBitfields : BiRgb;
         BinaryPrimitives.WriteUInt32LittleEndian(dib.AsSpan(16), compression);
         BinaryPrimitives.WriteUInt32LittleEndian(dib.AsSpan(20), (uint)imageDataSize);
         BinaryPrimitives.WriteInt32LittleEndian(dib.AsSpan(24), 2835); // ~72 DPI
@@ -279,7 +282,7 @@ public static class BmpCoder
                     int dstOffset = x * bytesPerPixel;
                     ushort r, g, b;
 
-                    if (channels >= 3)
+                    if (channels - (image.HasAlpha ? 1 : 0) >= 3)
                     {
                         r = row[srcOffset];
                         g = row[srcOffset + 1];
@@ -296,7 +299,7 @@ public static class BmpCoder
 
                     if (bytesPerPixel == 4)
                     {
-                        ushort a = (channels >= 4) ? row[srcOffset + 3] : Quantum.MaxValue;
+                        ushort a = image.HasAlpha ? row[srcOffset + channels - 1] : Quantum.MaxValue;
                         rowBuffer[dstOffset + 3] = Quantum.ScaleToByte(a);
                     }
                 }
@@ -309,7 +312,7 @@ public static class BmpCoder
         }
     }
 
-    public static void Write(ImageFrame image, string path, bool includeAlpha = false)
+    public static void Write(ImageFrame image, string path, bool includeAlpha = true)
     {
         using var stream = File.Create(path);
         Write(image, stream, includeAlpha);

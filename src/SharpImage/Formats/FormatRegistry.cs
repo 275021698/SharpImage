@@ -2,6 +2,7 @@
 // Provides automatic format detection from file headers and extensions,
 // and a single API to read/write any supported format.
 
+using SharpImage.Core;
 using SharpImage.Image;
 
 namespace SharpImage.Formats;
@@ -393,6 +394,14 @@ public static class FormatRegistry
     /// </summary>
     public static byte[] Encode(ImageFrame image, ImageFileFormat format)
     {
+        // CMYK frames (CMYK / YCCK JPEGs hold ink amounts) go to every writer but JPEG's as sRGB: the writers read
+        // the first three channels as R, G, B, which turned CMYK into a colour negative.
+        if (image.Colorspace == ColorspaceType.CMYK && format != ImageFileFormat.Jpeg)
+        {
+            using var rgb = CmykToSrgb(image);
+            return Encode(rgb, format);
+        }
+
         return format switch
         {
             ImageFileFormat.Png => EncodeToStream(image, (img, s) => PngCoder.Write(img, s)),
@@ -493,5 +502,38 @@ public static class FormatRegistry
     {
         using var ms = new MemoryStream(data);
         return WebpCoder.Read(ms);
+    }
+
+    /// <summary>
+    /// CMYK ink amounts to sRGB with the device formula ImageMagick and Pillow use when no colour profile is applied:
+    /// R = (1 - C)(1 - K) and likewise for G / B; alpha is kept.
+    /// </summary>
+    internal static ImageFrame CmykToSrgb(ImageFrame cmyk)
+    {
+        int w = (int)cmyk.Columns, h = (int)cmyk.Rows, sc = cmyk.NumberOfChannels;
+        var rgb = new ImageFrame();
+        rgb.Initialize(w, h, ColorspaceType.SRGB, cmyk.HasAlpha);
+        int dc = rgb.NumberOfChannels;
+        for (int y = 0; y < h; y++)
+        {
+            var s = cmyk.GetPixelRow(y);
+            var d = rgb.GetPixelRowForWrite(y);
+            for (int x = 0; x < w; x++)
+            {
+                int so = x * sc, dofs = x * dc;
+                uint k = 65535u - s[so + 3];
+                for (int c = 0; c < 3; c++)
+                    d[dofs + c] = (ushort)(((65535u - s[so + c]) * k + 32767) / 65535);
+                if (cmyk.HasAlpha) d[dofs + 3] = s[so + sc - 1];
+            }
+        }
+        // keep Exif / XMP / IPTC (and orientation); a CMYK profile no longer describes the data
+        rgb.Metadata = new SharpImage.Metadata.ImageMetadata
+        {
+            ExifProfile = cmyk.Metadata.ExifProfile, Xmp = cmyk.Metadata.Xmp, IptcProfile = cmyk.Metadata.IptcProfile,
+            PixelAspectRatio = cmyk.Metadata.PixelAspectRatio,
+        };
+        rgb.Orientation = cmyk.Orientation;
+        return rgb;
     }
 }

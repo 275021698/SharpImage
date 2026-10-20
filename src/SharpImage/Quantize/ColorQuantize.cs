@@ -130,6 +130,9 @@ public static class ColorQuantize
         public int Volume => (MaxR - MinR + 1) * (MaxG - MinG + 1) * (MaxB - MinB + 1);
     }
 
+    /// <summary>Median-cut palette (at most maxColors [R,G,B] entries) of packed 8-bit RGB pixels.</summary>
+    internal static byte[][] MedianCutPalette(byte[] rgb, int pixelCount, int maxColors) => MedianCut(rgb, pixelCount, maxColors);
+
     private static byte[][] MedianCut(byte[] pixels, int pixelCount, int maxColors)
     {
         // Initial box encompassing all pixels
