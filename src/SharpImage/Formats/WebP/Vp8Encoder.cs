@@ -64,6 +64,9 @@ public sealed class WebpLossyOptions
     /// <summary>Iterative sharp RGB->YUV conversion, slower but sharper chroma (cwebp -sharp_yuv). Default false.</summary>
     public bool UseSharpYuv { get; set; }
 
+    /// <summary>Reduce memory use: no token buffer, a statistics pass instead (cwebp -low_memory). Default false.</summary>
+    public bool LowMemory { get; set; }
+
     /// <summary>Keep the RGB under fully transparent pixels (cwebp -exact). Default false.</summary>
     public bool Exact { get; set; }
 
@@ -303,8 +306,11 @@ internal sealed partial class Vp8Encoder
                            (limit * limit) / (100 * 100);  // ... modulated with a quadratic curve.
         _mbHeaderLimit = (long)256 * 510 * 8 * 1024 / (_mbW * _mbH);
         _doSearch = config.TargetSize > 0 || config.TargetPsnr > 0;
-        _useTokens = _rdOptLevel >= RdOptBasic;  // need rd stats
-        if (_useTokens) _numParts = 1;   // doesn't work with multi-partition
+        if (!config.LowMemory)
+        {
+            _useTokens = _rdOptLevel >= RdOptBasic;  // need rd stats
+            if (_useTokens) _numParts = 1;   // doesn't work with multi-partition
+        }
 
         DefaultProbas();
         // ResetSegmentHeader

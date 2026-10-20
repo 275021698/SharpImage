@@ -7,7 +7,7 @@ namespace SharpImage.Tests.Formats;
 /// <summary>
 /// The WebP lossy (VP8 + ALPH) encoder is a line-by-line port of libwebp 1.6.0: the golden files are libwebp's
 /// WebPEncode of the same RGBA (written by the _refs/webptwin harness) and must match byte for byte — every method,
-/// the alpha options, the RD / trellis levels, autofilter, simple filter, token partitions, the PSNR search and sharp YUV.
+/// the alpha options, the RD / trellis levels, autofilter, simple filter, token partitions, the PSNR search, sharp YUV and low-memory mode.
 /// </summary>
 public sealed class WebpLossyEncoderTests
 {
@@ -54,13 +54,14 @@ public sealed class WebpLossyEncoderTests
         "ly_parts" => new() { Method = 2, Partitions = 2 },
         "ly_psnr" => new() { Pass = 4, TargetPsnr = 42 },
         "ly_sharp" => new() { UseSharpYuv = true },
+        "ly_lowmem" => new() { Method = 5, LowMemory = true, Partitions = 2 },
         _ => throw new ArgumentException(tag),
     };
 
     public static IEnumerable<(string Name, string Tag)> Cases()
     {
         string[] names = ["pal2", "pal16", "pal200", "transparent", "gradient_alpha", "tiny3x2", "thin", "noise", "crop_odd"];
-        string[] tags = ["ly", "ly_m0", "ly_m2", "ly_m3", "ly_m5", "ly_m6", "ly_q10", "ly_af", "ly_simple", "ly_parts", "ly_psnr", "ly_sharp"];
+        string[] tags = ["ly", "ly_m0", "ly_m2", "ly_m3", "ly_m5", "ly_m6", "ly_q10", "ly_af", "ly_simple", "ly_parts", "ly_psnr", "ly_sharp", "ly_lowmem"];
         foreach (var n in names)
             foreach (var t in tags)
                 yield return (n, t);
