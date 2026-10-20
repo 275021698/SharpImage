@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics.X86;
 
 namespace SharpImage.Formats.WebP;
 
@@ -26,7 +27,7 @@ internal sealed class Vp8Matrix
 /// TransformWHT and loop filters of src/dsp/dec.c, VP8SSIMGetClipped of src/dsp/ssim.c and the quantizer helpers of
 /// src/dsp/quant.h. Blocks live in BPS-strided work buffers addressed by (array, offset).
 /// </summary>
-internal static class Vp8EncDsp
+internal static partial class Vp8EncDsp
 {
     public const int Bps = 32;
     public const int QFix = 17;
@@ -151,6 +152,14 @@ internal static class Vp8EncDsp
     /// <summary>ITransform_C.</summary>
     public static void ITransform(byte[] refBuf, int refOff, ReadOnlySpan<short> input, byte[] dst, int dstOff, bool doTwo)
     {
+        if (Sse2.IsSupported)
+        {
+            if (doTwo)
+                ITransformTwoSse2(refBuf, refOff, input, dst, dstOff);
+            else
+                ITransformOneSse2(refBuf, refOff, input, dst, dstOff);
+            return;
+        }
         ITransformOne(refBuf, refOff, input, dst, dstOff);
         if (doTwo) ITransformOne(refBuf, refOff + 4, input.Slice(16), dst, dstOff + 4);
     }
@@ -158,6 +167,11 @@ internal static class Vp8EncDsp
     /// <summary>FTransform_C.</summary>
     public static void FTransform(byte[] src, int srcOff, byte[] refBuf, int refOff, Span<short> output)
     {
+        if (Sse2.IsSupported)
+        {
+            FTransformSse2(src, srcOff, refBuf, refOff, output);
+            return;
+        }
         Span<int> tmp = stackalloc int[16];
         for (int i = 0; i < 4; ++i, srcOff += Bps, refOff += Bps)
         {
@@ -190,6 +204,11 @@ internal static class Vp8EncDsp
     /// <summary>FTransform2_C.</summary>
     public static void FTransform2(byte[] src, int srcOff, byte[] refBuf, int refOff, Span<short> output)
     {
+        if (Sse2.IsSupported)
+        {
+            FTransform2Sse2(src, srcOff, refBuf, refOff, output);
+            return;
+        }
         FTransform(src, srcOff, refBuf, refOff, output);
         FTransform(src, srcOff + 4, refBuf, refOff + 4, output.Slice(16));
     }
@@ -519,10 +538,17 @@ internal static class Vp8EncDsp
         return count;
     }
 
-    public static int Sse16x16(byte[] a, int ao, byte[] b, int bo) => GetSse(a, ao, b, bo, 16, 16);
-    public static int Sse16x8(byte[] a, int ao, byte[] b, int bo) => GetSse(a, ao, b, bo, 16, 8);
-    public static int Sse8x8(byte[] a, int ao, byte[] b, int bo) => GetSse(a, ao, b, bo, 8, 8);
-    public static int Sse4x4(byte[] a, int ao, byte[] b, int bo) => GetSse(a, ao, b, bo, 4, 4);
+    public static int Sse16x16(byte[] a, int ao, byte[] b, int bo) =>
+        Sse2.IsSupported ? Sse16xNSse2(a, ao, b, bo, 8) : GetSse(a, ao, b, bo, 16, 16);
+
+    public static int Sse16x8(byte[] a, int ao, byte[] b, int bo) =>
+        Sse2.IsSupported ? Sse16xNSse2(a, ao, b, bo, 4) : GetSse(a, ao, b, bo, 16, 8);
+
+    public static int Sse8x8(byte[] a, int ao, byte[] b, int bo) =>
+        Sse2.IsSupported ? Sse8x8Sse2(a, ao, b, bo) : GetSse(a, ao, b, bo, 8, 8);
+
+    public static int Sse4x4(byte[] a, int ao, byte[] b, int bo) =>
+        Sse2.IsSupported ? Sse4x4Sse2(a, ao, b, bo) : GetSse(a, ao, b, bo, 4, 4);
 
     /// <summary>Mean16x4_C.</summary>
     public static void Mean16x4(byte[] refBuf, int r, Span<uint> dc)
@@ -538,7 +564,7 @@ internal static class Vp8EncDsp
         }
     }
 
-    private static int TTransform(byte[] input, int ip, ReadOnlySpan<ushort> w)
+    private static int TTransform(byte[] input, int ip, ushort[] w)
     {
         int sum = 0;
         Span<int> tmp = stackalloc int[16];
@@ -572,15 +598,16 @@ internal static class Vp8EncDsp
     }
 
     /// <summary>Disto4x4_C.</summary>
-    public static int TDisto4x4(byte[] a, int ao, byte[] b, int bo, ReadOnlySpan<ushort> w)
+    public static int TDisto4x4(byte[] a, int ao, byte[] b, int bo, ushort[] w)
     {
+        if (Sse2.IsSupported) return Math.Abs(TTransformSse2(a, ao, b, bo, w)) >> 5;
         int sum1 = TTransform(a, ao, w);
         int sum2 = TTransform(b, bo, w);
         return Math.Abs(sum2 - sum1) >> 5;
     }
 
     /// <summary>Disto16x16_C.</summary>
-    public static int TDisto16x16(byte[] a, int ao, byte[] b, int bo, ReadOnlySpan<ushort> w)
+    public static int TDisto16x16(byte[] a, int ao, byte[] b, int bo, ushort[] w)
     {
         int d = 0;
         for (int y = 0; y < 16 * Bps; y += 4 * Bps)
@@ -594,6 +621,7 @@ internal static class Vp8EncDsp
     /// <summary>QuantizeBlock_C (also VP8EncQuantizeBlockWHT).</summary>
     public static int QuantizeBlock(Span<short> input, Span<short> output, Vp8Matrix mtx)
     {
+        if (Sse2.IsSupported) return DoQuantizeBlockSse2(input, output, mtx.Sharpen, mtx);
         int last = -1;
         for (int n = 0; n < 16; ++n)
         {
