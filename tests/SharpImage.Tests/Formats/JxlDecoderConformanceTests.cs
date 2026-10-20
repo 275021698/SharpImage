@@ -111,6 +111,14 @@ public class JxlDecoderConformanceTests
     }
 
     [Test]
+    public async Task OpsinBiasCbrt_MatchesLibjxl()
+    {
+        // libjxl's cbrtf of the default opsin bias (its MSVC runtime is one ulp off the correctly rounded value).
+        float c = LjDec.CbrtF(-0.0037930732552754493f);
+        await Assert.That(BitConverter.SingleToUInt32Bits(c)).IsEqualTo(0xBE1FB276u);
+    }
+
+    [Test]
     public async Task ReconstructJpeg_ReturnsNull_WithoutJbrd()
     {
         byte[] jxl = File.ReadAllBytes(Path.Combine(ConfDir, "grayscale.jxl"));

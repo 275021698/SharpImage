@@ -302,8 +302,8 @@ internal sealed partial class LjFrameDecoder
             dc = new LjImage3F(Fd.XsizeBlocks, Fd.YsizeBlocks);
         }
 
-        xDmMultiplier = MathF.Pow(1 / 1.25f, Fh.XQmScale - 2.0f);
-        bDmMultiplier = MathF.Pow(1 / 1.25f, Fh.BQmScale - 2.0f);
+        xDmMultiplier = LjDec.PowF(1 / 1.25f, Fh.XQmScale - 2.0f);
+        bDmMultiplier = LjDec.PowF(1 / 1.25f, Fh.BQmScale - 2.0f);
         usedAcs = 0;
         if (Fh.LoopFilter.EpfIters > 0)
         {

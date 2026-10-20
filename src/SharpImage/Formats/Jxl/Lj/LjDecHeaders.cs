@@ -24,6 +24,20 @@ internal static partial class LjDec
         return (x & (x - 1)) == 0 ? floor : floor + 1;
     }
 
+    // C library float functions. powf/logf/log2f go through double precision (correctly rounded, so independent of
+    // the C runtime .NET reaches). cbrtf is not correctly rounded in the MSVC runtime djxl links, so the value it
+    // gives for the default opsin bias is pinned; other inputs use the system cbrtf.
+    public static float CbrtF(float x) =>
+        BitConverter.SingleToUInt32Bits(x) == 0xBB789536u
+            ? BitConverter.UInt32BitsToSingle(0xBE1FB276u)   // libjxl's cbrtf(-0.0037930732552754493f), the default opsin bias
+            : MathF.Cbrt(x);
+
+    public static float PowF(float a, float b) => (float)Math.Pow(a, b);
+
+    public static float LogF(float x) => (float)Math.Log(x);
+
+    public static float Log2F(float x) => (float)Math.Log2(x);
+
     public static int FloorLog2Nonzero(long x) => 63 - System.Numerics.BitOperations.LeadingZeroCount((ulong)x);
 
     public static int DivCeil(int a, int b) => (a + b - 1) / b;

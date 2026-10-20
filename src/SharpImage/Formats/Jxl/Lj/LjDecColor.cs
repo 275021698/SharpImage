@@ -297,7 +297,7 @@ internal sealed class LjOutputEncoding
         for (int i = 0; i < 3; i++)
         {
             OpsinParams.OpsinBiases[i] = im.OpsinBiases[i];
-            OpsinParams.OpsinBiasesCbrt[i] = MathF.Cbrt(OpsinParams.OpsinBiases[i]);
+            OpsinParams.OpsinBiasesCbrt[i] = LjDec.CbrtF(OpsinParams.OpsinBiases[i]);
         }
 
         OpsinParams.OpsinBiasesCbrt[3] = OpsinParams.OpsinBiases[3] = 1;
@@ -381,7 +381,7 @@ internal sealed class LjHlgOotf
     }
 
     public static LjHlgOotf ToSceneLight(float displayLuminance, float[] lum) =>
-        new((1 / 1.2f) * MathF.Pow(1.111f, -MathF.Log2(displayLuminance / 1000.0f)), lum);
+        new((1 / 1.2f) * LjDec.PowF(1.111f, -LjDec.Log2F(displayLuminance / 1000.0f)), lum);
 
     public void Apply(ref float r, ref float g, ref float b)
     {

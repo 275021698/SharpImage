@@ -584,7 +584,7 @@ internal sealed class LjSplines
             maxColor = MathF.Max(maxColor, MathF.Abs(color[c] * intensity));
         }
 
-        float maximumDistance = MathF.Sqrt(-2.0f * sigma * sigma * ((MathF.Log(0.1f) * distanceExp) - MathF.Log(maxColor)));
+        float maximumDistance = MathF.Sqrt(-2.0f * sigma * sigma * ((LjDec.LogF(0.1f) * distanceExp) - LjDec.LogF(maxColor)));
         long y0 = Math.Max(RoundAway(center.Y - maximumDistance), 0);
         long y1 = Math.Min(RoundAway(center.Y + maximumDistance) + 1, imageYsize);
         if (y1 <= y0)
