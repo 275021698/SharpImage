@@ -10,7 +10,10 @@ namespace SharpImage.Formats.Hevc;
 
 internal static class HeicEncoder
 {
-    /// <summary>Encodes 8-bit RGB (row-major, channels: r,g,b[,a]) into a HEIC file.</summary>
+    /// <summary>
+    /// Encodes 8-bit RGB (row-major, channels: r,g,b[,a]) into a HEIC file. With 4 channels the alpha plane is a second,
+    /// hidden HEVC item linked to the colour item as its alpha auxiliary image ('auxl' + auxC), as libheif writes it.
+    /// </summary>
     public static byte[] Encode(ReadOnlySpan<byte> rgb, int width, int height, int channels, int qp, bool signDataHiding)
     {
         int pw = (width + 31) & ~31;
@@ -20,6 +23,7 @@ internal static class HeicEncoder
         var luma = new byte[pw * ph];
         var cbFull = new int[pw * ph];
         var crFull = new int[pw * ph];
+        byte[]? alpha = channels == 4 ? new byte[pw * ph] : null;
         for (int y = 0; y < ph; y++)
         {
             int sy = Math.Min(y, height - 1);
@@ -31,6 +35,7 @@ internal static class HeicEncoder
                 luma[(y * pw) + x] = (byte)Clamp8(((19595 * r) + (38470 * g) + (7471 * b) + 32768) >> 16);
                 cbFull[(y * pw) + x] = Clamp8((((-11056 * r) - (21712 * g) + (32768 * b) + 8388608) >> 16));
                 crFull[(y * pw) + x] = Clamp8((((32768 * r) - (27440 * g) - (5328 * b) + 8388608) >> 16));
+                if (alpha != null) alpha[(y * pw) + x] = rgb[o + 3];
             }
         }
 
@@ -49,7 +54,26 @@ internal static class HeicEncoder
             }
         }
 
-        // Encode the slice.
+        // 4:2:0 can only crop (conformance window) in 2-pixel steps: the coded picture is the even-rounded size, and
+        // an odd width / height is cropped by a 'clap' box (as libheif writes it).
+        int evenW = (width + 1) & ~1, evenH = (height + 1) & ~1;
+        var (hvcC, sample) = EncodeItem(luma, cb, cr, pw, ph, evenW, evenH, qp, signDataHiding);
+        byte[]? alphaHvcC = null, alphaSample = null;
+        if (alpha != null)
+        {
+            // the alpha plane is the luma of a 4:2:0 picture with neutral chroma
+            var neutral = new byte[cw * chh];
+            Array.Fill(neutral, (byte)128);
+            (alphaHvcC, alphaSample) = EncodeItem(alpha, neutral, (byte[])neutral.Clone(), pw, ph, evenW, evenH, qp, signDataHiding);
+        }
+
+        return BuildIsoBmff(width, height, evenW, evenH, hvcC, sample, alphaHvcC, alphaSample);
+    }
+
+    /// <summary>One HEVC still: its hvcC configuration and the 4-byte-length-prefixed slice NAL (the item's data).</summary>
+    private static (byte[] HvcC, byte[] Sample) EncodeItem(byte[] luma, byte[] cb, byte[] cr, int pw, int ph, int codedW,
+        int codedH, int qp, bool signDataHiding)
+    {
         var enc = new HevcIntraFrameEncoder(luma, cb, cr, pw, ph, qp, signDataHiding);
         byte[] cabac = enc.EncodeSliceData();
 
@@ -60,17 +84,14 @@ internal static class HeicEncoder
 
         // Parameter sets (NAL units, for the hvcC arrays).
         byte[] vps = HevcStreamWriter.WrapNal(HevcStreamWriter.NalVps, HevcStreamWriter.BuildVps());
-        byte[] sps = HevcStreamWriter.WrapNal(HevcStreamWriter.NalSps, HevcStreamWriter.BuildSps(pw, ph, pw - width, ph - height));
+        byte[] sps = HevcStreamWriter.WrapNal(HevcStreamWriter.NalSps, HevcStreamWriter.BuildSps(pw, ph, pw - codedW, ph - codedH));
         byte[] pps = HevcStreamWriter.WrapNal(HevcStreamWriter.NalPps, HevcStreamWriter.BuildPps(qp - 26, signDataHiding));
 
-        byte[] hvcC = BuildHvcC(vps, sps, pps);
-
-        // mdat = 4-byte-length-prefixed slice NAL.
-        var mdatPayload = new List<byte>();
-        AppendU32(mdatPayload, (uint)sliceNal.Length);
-        mdatPayload.AddRange(sliceNal);
-
-        return BuildIsoBmff(width, height, hvcC, mdatPayload.ToArray());
+        // item data = 4-byte-length-prefixed slice NAL.
+        var sample = new List<byte>();
+        AppendU32(sample, (uint)sliceNal.Length);
+        sample.AddRange(sliceNal);
+        return (BuildHvcC(vps, sps, pps), sample.ToArray());
     }
 
     private static byte[] BuildHvcC(byte[] vps, byte[] sps, byte[] pps)
@@ -104,67 +125,78 @@ internal static class HeicEncoder
         c.AddRange(nal);
     }
 
-    private static byte[] BuildIsoBmff(int width, int height, byte[] hvcC, byte[] mdatPayload)
+    private static byte[] BuildIsoBmff(int width, int height, int codedW, int codedH, byte[] hvcC, byte[] sample,
+        byte[]? alphaHvcC, byte[]? alphaSample)
     {
+        bool hasAlpha = alphaHvcC != null;
         byte[] ftyp = Box("ftyp", Concat(Fourcc("heic"), U32(0), Fourcc("mif1"), Fourcc("heic")));
 
-        // property container: ipco { hvcC, ispe, colr }
-        byte[] hvcCBox = Box("hvcC", hvcC);
-        byte[] ispe = FullBox("ispe", 0, 0, Concat(U32((uint)width), U32((uint)height)));
+        // property container: ipco { hvcC, ispe, colr[, clap][, alpha hvcC, auxC] }
+        byte[] ispe = FullBox("ispe", 0, 0, Concat(U32((uint)codedW), U32((uint)codedH)));
         byte[] colr = Box("colr", Concat(Fourcc("nclx"), U16(1), U16(13), U16(6), new byte[] { 0x80 })); // BT.601, full range
-        byte[] ipco = Box("ipco", Concat(hvcCBox, ispe, colr));
+        bool crop = codedW != width || codedH != height;
+        // clap: clean aperture width/height and the offset of its centre from the coded picture's centre (all as
+        // fractions N/D); dropping the last column / row moves the centre by -1/2.
+        byte[] clap = Box("clap", Concat(U32((uint)width), U32(1), U32((uint)height), U32(1),
+            U32((uint)(width - codedW)), U32(2), U32((uint)(height - codedH)), U32(2)));
+        var props = new List<byte[]> { Box("hvcC", hvcC), ispe, colr };
+        if (crop) props.Add(clap);
+        int alphaHvcCIndex = 0, auxCIndex = 0;
+        if (hasAlpha)
+        {
+            props.Add(Box("hvcC", alphaHvcC!));
+            alphaHvcCIndex = props.Count;
+            props.Add(FullBox("auxC", 0, 0, Concat(System.Text.Encoding.ASCII.GetBytes("urn:mpeg:hevc:2015:auxid:1"), new byte[] { 0 })));
+            auxCIndex = props.Count;
+        }
+        byte[] ipco = Box("ipco", Concat(props.ToArray()));
 
-        // ipma: item 1 -> properties 1,2,3 (hvcC, ispe, colr), hvcC marked essential.
-        byte[] ipmaPayload = Concat(
-            U32(1),                 // entry_count
-            U16(1),                 // item_id = 1
-            new byte[] { 3 },       // association_count
-            new byte[] { 0x81 },    // essential | property_index 1 (hvcC)
-            new byte[] { 0x02 },    // property_index 2 (ispe)
-            new byte[] { 0x03 });   // property_index 3 (colr)
-        byte[] ipma = FullBox("ipma", 0, 0, ipmaPayload);
+        // ipma: item 1 -> hvcC (essential), ispe, colr[, clap (essential)];
+        //       item 2 (alpha) -> its hvcC (essential), ispe[, clap (essential)], auxC (essential)
+        var e1 = new List<byte> { 0x81, 0x02, 0x03 };
+        if (crop) e1.Add(0x84);
+        var ipmaEntries = new List<byte[]> { Concat(U16(1), new[] { (byte)e1.Count }, e1.ToArray()) };
+        if (hasAlpha)
+        {
+            var e2 = new List<byte> { (byte)(0x80 | alphaHvcCIndex), 0x02 };
+            if (crop) e2.Add(0x84);
+            e2.Add((byte)(0x80 | auxCIndex));
+            ipmaEntries.Add(Concat(U16(2), new[] { (byte)e2.Count }, e2.ToArray()));
+        }
+        byte[] ipma = FullBox("ipma", 0, 0, Concat(U32((uint)ipmaEntries.Count), Concat(ipmaEntries.ToArray())));
         byte[] iprp = Box("iprp", Concat(ipco, ipma));
 
         byte[] hdlr = FullBox("hdlr", 0, 0, Concat(U32(0), Fourcc("pict"), U32(0), U32(0), U32(0), new byte[] { 0 }));
         byte[] pitm = FullBox("pitm", 0, 0, U16(1));
-        // iinf { infe (item 1, type hvc1) }
-        byte[] infe = FullBox("infe", 2, 0, Concat(U16(1), U16(0), Fourcc("hvc1"), new byte[] { 0 }));
-        byte[] iinf = FullBox("iinf", 0, 0, Concat(U16(1), infe));
+        // iinf { infe (item 1, hvc1)[, infe (item 2, hvc1, hidden)] }
+        byte[] infe1 = FullBox("infe", 2, 0, Concat(U16(1), U16(0), Fourcc("hvc1"), new byte[] { 0 }));
+        byte[] iinf = hasAlpha
+            ? FullBox("iinf", 0, 0, Concat(U16(2), infe1, FullBox("infe", 2, 1, Concat(U16(2), U16(0), Fourcc("hvc1"), new byte[] { 0 }))))
+            : FullBox("iinf", 0, 0, Concat(U16(1), infe1));
+        // iref: item 2 is the alpha auxiliary image of item 1
+        byte[] iref = hasAlpha ? FullBox("iref", 0, 0, Box("auxl", Concat(U16(2), U16(1), U16(1)))) : Array.Empty<byte>();
 
-        // iloc: version 1, offset_size=4, length_size=4, base_offset_size=0; one item, one extent.
-        // The extent offset points at the start of the mdat payload (filled in after layout).
-        // Build meta with a placeholder offset, then patch.
-        int mdatOffsetPlaceholder = 0;
-        byte[] ilocPayload = Concat(
-            new byte[] { 0x44 },    // offset_size(4)=4 | length_size(4)=4
-            new byte[] { 0x00 },    // base_offset_size(4)=0 | reserved(4)
-            U16(1),                 // item_count
-            U16(1),                 // item_id
-            U16(0),                 // construction_method(4)+reserved(12)=0 (v1)
-            U16(0),                 // data_reference_index
-            U16(1),                 // extent_count
-            U32((uint)mdatOffsetPlaceholder), // extent_offset (patched)
-            U32((uint)mdatPayload.Length));   // extent_length
-        // iloc offset field position within ilocPayload: after [0x44][0x00][item_count:2][item_id:2]
-        // [cm:2][dri:2][ec:2] = 1+1+2+2+2+2+2 = 12 bytes, then extent_offset(4).
-        byte[] iloc = FullBox("iloc", 1, 0, ilocPayload);
+        byte[] mdatPayload = hasAlpha ? Concat(sample, alphaSample!) : sample;
 
-        byte[] metaPayload = Concat(hdlr, pitm, iinf, iprp, iloc);
-        byte[] meta = FullBox("meta", 0, 0, metaPayload);
+        // iloc (version 1, offset_size 4, length_size 4, no base offset): one extent per item in mdat. The meta size
+        // does not depend on the offsets, so lay it out once with zeros, then again with the real offsets.
+        byte[] BuildMeta(uint dataOffset)
+        {
+            var items = new List<byte[]> { IlocItem(1, dataOffset, (uint)sample.Length) };
+            if (hasAlpha) items.Add(IlocItem(2, dataOffset + (uint)sample.Length, (uint)alphaSample!.Length));
+            byte[] iloc = FullBox("iloc", 1, 0, Concat(new byte[] { 0x44, 0x00 }, U16(items.Count), Concat(items.ToArray())));
+            return FullBox("meta", 0, 0, Concat(hdlr, pitm, iinf, iref, iprp, iloc));
+        }
 
-        byte[] mdat = Box("mdat", mdatPayload);
-
-        // Layout: ftyp | meta | mdat. Compute the absolute offset of mdatPayload start.
-        int mdatBoxOffset = ftyp.Length + meta.Length;
-        int mdatPayloadOffset = mdatBoxOffset + 8; // box header (size+type)
-
-        // Patch the iloc extent_offset inside `meta`.
-        // Find the iloc box within meta and patch its extent_offset. Its layout offset is stable:
-        int ilocOffsetInMeta = meta.Length - iloc.Length + 8 /*box header*/ + 4 /*fullbox ver+flags*/ + 12 /*to extent_offset*/;
-        WriteU32(meta, ilocOffsetInMeta, (uint)mdatPayloadOffset);
-
-        return Concat(ftyp, meta, mdat);
+        byte[] meta = BuildMeta(0);
+        uint mdatPayloadOffset = (uint)(ftyp.Length + meta.Length + 8);
+        meta = BuildMeta(mdatPayloadOffset);
+        return Concat(ftyp, meta, Box("mdat", mdatPayload));
     }
+
+    private static byte[] IlocItem(int itemId, uint offset, uint length) =>
+        Concat(U16(itemId), U16(0) /* construction_method 0 */, U16(0) /* data_reference_index */, U16(1) /* extents */,
+            U32(offset), U32(length));
 
     // ---- box helpers ----
     private static byte[] Box(string type, byte[] payload) => Concat(U32((uint)(payload.Length + 8)), Fourcc(type), payload);

@@ -971,7 +971,10 @@ public static partial class HeifCoder
             if (c.Ispe(aTiles[i]) is { } ispe) (w, h) = ispe;
             var af = new ImageFrame();
             af.Initialize(w, h, ColorspaceType.SRGB, false);
-            ApplyAv1Alpha(coded, af, w, h, c, aTiles[i]);
+            if (c.Items.TryGetValue(aTiles[i], out var alphaItem) && alphaItem.Type == "hvc1")
+                ApplyHevcAlpha(coded, af, w, h, c, aTiles[i]);
+            else
+                ApplyAv1Alpha(coded, af, w, h, c, aTiles[i]);
             if (!frame.HasAlpha) frame.SetAlpha(true);
             Blit(af, frame, (i % cols) * w, (i / cols) * h, alphaOnly: true);
         }
@@ -1093,22 +1096,25 @@ public static partial class HeifCoder
 
         int w = (int)image.Columns;
         int h = (int)image.Rows;
-        var rgb = new byte[w * h * 3];
+        int ch = image.NumberOfChannels;
+        int colors = ch - (image.HasAlpha ? 1 : 0);
+        int outCh = image.HasAlpha ? 4 : 3;
+        var rgb = new byte[w * h * outCh];
         for (int y = 0; y < h; y++)
         {
             ReadOnlySpan<ushort> row = image.GetPixelRow(y);
-            int ch = image.NumberOfChannels;
             for (int x = 0; x < w; x++)
             {
                 int o = x * ch;
-                int d = ((y * w) + x) * 3;
+                int d = ((y * w) + x) * outCh;
                 rgb[d] = Quantum.ScaleToByte(row[o]);
-                rgb[d + 1] = Quantum.ScaleToByte(ch > 1 ? row[o + 1] : row[o]);
-                rgb[d + 2] = Quantum.ScaleToByte(ch > 2 ? row[o + 2] : row[o]);
+                rgb[d + 1] = Quantum.ScaleToByte(colors > 1 ? row[o + 1] : row[o]);
+                rgb[d + 2] = Quantum.ScaleToByte(colors > 2 ? row[o + 2] : row[o]);
+                if (outCh == 4) rgb[d + 3] = Quantum.ScaleToByte(row[o + ch - 1]);
             }
         }
 
-        return Hevc.HeicEncoder.Encode(rgb, w, h, 3, Math.Clamp(qp, 0, 51), signDataHiding: true);
+        return Hevc.HeicEncoder.Encode(rgb, w, h, outCh, Math.Clamp(qp, 0, 51), signDataHiding: true);
     }
 
     // AVIF encode via the from-scratch AV1 intra encoder. Current scope: grayscale, up to one 64x64 superblock.
@@ -2409,16 +2415,6 @@ public static partial class HeifCoder
         return true;
     }
 
-    // Grey source -> 4:0:0 luma (Y = the grey value; limited range maps it into [16, 235] << (bd - 8)).
-    private static ushort[] GreyLuma(double[] r, int w, int h, int bd, Av1.Av1ObuWriter.Av1ColorDesc color)
-    {
-        int max = (1 << bd) - 1;
-        var luma = new ushort[w * h];
-        for (int i = 0; i < luma.Length; i++)
-            luma[i] = (ushort)Math.Clamp((int)Math.Round(color.FullRange ? r[i] : r[i] / max * (219 << (bd - 8)) + (16 << (bd - 8))), 0, max);
-        return luma;
-    }
-
     // libavif avifImageRGBToYUV's built-in path operation for operation (float, 2x2 blocks, chroma averaged in block
     // order, avifRoundf), for the kr/kb matrices and identity. The RGB samples are taken at the source's depth
     // (srcDepth: ImageFrame.Depth, 16 when unknown — exact for 8-bit sources too), as libavif's avifRGBImage holds them,
@@ -2495,59 +2491,6 @@ public static partial class HeifCoder
                     }
                 }
             }
-    }
-
-    private static void RgbToYuvAvif(double[] r, double[] g, double[] b, int w, int h, int bd, Av1.Av1PixelLayout layout,
-        Av1.Av1ObuWriter.Av1ColorDesc color, out ushort[] y, out ushort[] u, out ushort[] v)
-    {
-        int max = (1 << bd) - 1;
-        bool full = color.FullRange;
-        double biasY = full ? 0 : 16 << (bd - 8), rangeY = full ? max : 219 << (bd - 8);
-        double biasUV = 1 << (bd - 1), rangeUV = full ? max : 224 << (bd - 8);
-        int mc = color.Matrix;
-        (double kr, double kb) = mc == 12 ? ChromaDerivedKrKb(color.Primaries) : MatrixKrKb(mc);
-        double kg = 1 - kr - kb;
-        int ssX = layout == Av1.Av1PixelLayout.I444 ? 0 : 1, ssY = layout == Av1.Av1PixelLayout.I420 ? 1 : 0;
-        int cw = (w + ssX) >> ssX, chh = (h + ssY) >> ssY;
-        y = new ushort[w * h];
-        u = new ushort[cw * chh];
-        v = new ushort[cw * chh];
-        var uf = new double[cw * chh];
-        var vf = new double[cw * chh];
-        var cnt = new int[cw * chh];
-        int rgbMax = mc == 16 ? (1 << (bd - 2)) - 1 : mc == 17 ? (1 << (bd - 1)) - 1 : max;
-        for (int yy = 0; yy < h; yy++)
-        {
-            for (int xx = 0; xx < w; xx++)
-            {
-                int i = yy * w + xx;
-                double R = r[i] / max, G = g[i] / max, B = b[i] / max, Y, U, V;
-                if (mc == 0) { Y = G; U = B; V = R; }
-                else if (mc == 8) { Y = 0.5 * G + 0.25 * (R + B); U = 0.5 * G - 0.25 * (R + B); V = 0.5 * (R - B); }
-                else if (mc is 16 or 17)
-                {
-                    int Ri = (int)Math.Round(Math.Clamp(R * rgbMax, 0, rgbMax)), Gi = (int)Math.Round(Math.Clamp(G * rgbMax, 0, rgbMax));
-                    int Bi = (int)Math.Round(Math.Clamp(B * rgbMax, 0, rgbMax));
-                    int co = Ri - Bi, tt = Bi + (co >> 1), cg = Gi - tt;
-                    Y = (tt + (cg >> 1)) / rangeY; U = cg / rangeUV; V = co / rangeUV;
-                }
-                else { Y = kr * R + kg * G + kb * B; U = (B - Y) / (2 * (1 - kb)); V = (R - Y) / (2 * (1 - kr)); }
-                y[i] = (ushort)Math.Clamp((int)Math.Round(Y * rangeY + biasY), 0, max);
-                int ci = (yy >> ssY) * cw + (xx >> ssX);
-                uf[ci] += U;
-                vf[ci] += V;
-                cnt[ci]++;
-            }
-        }
-
-        // Identity codes chroma planes with the luma range (H.273: G, B, R are all "luma-like").
-        double cRange = mc == 0 ? rangeY : rangeUV, cBias = mc == 0 ? biasY : biasUV;
-        for (int i = 0; i < cw * chh; i++)
-        {
-            int n = cnt[i] > 0 ? cnt[i] : 1;
-            u[i] = (ushort)Math.Clamp((int)Math.Round(uf[i] / n * cRange + cBias), 0, max);
-            v[i] = (ushort)Math.Clamp((int)Math.Round(vf[i] / n * cRange + cBias), 0, max);
-        }
     }
 
     // libavif avifColorPrimariesComputeYCoeffs (H.273 eqs 32-37): kr/kb of the chromaticity-derived NCL matrix.
@@ -2986,42 +2929,6 @@ public static partial class HeifCoder
                 if (channels > 2)
                 {
                     row[off + 2] = Quantum.ScaleFromByte(b);
-                }
-            }
-        }
-    }
-
-    // Monochrome (I400): the luma plane IS the image. Replicate it into each output channel. Luma is treated as
-    // full-range gray (no BT.601/709 chroma matrix applies).
-    private static void ConvertGrayToRgb(ReadOnlySpan<byte> y0, int yStride, ImageFrame frame, int w, int h, int channels, bool tenBit, int shift)
-    {
-        for (int y = 0; y < h; y++)
-        {
-            var row = frame.GetPixelRowForWrite(y);
-            for (int x = 0; x < w; x++)
-            {
-                int yv;
-                if (!tenBit)
-                {
-                    yv = y0[y * yStride + x];
-                }
-                else
-                {
-                    int idx = (y * yStride + x) * 2;
-                    yv = (y0[idx] | (y0[idx + 1] << 8)) >> shift;
-                }
-
-                ushort q = Quantum.ScaleFromByte(ClampByte(yv));
-                int off = x * channels;
-                row[off] = q;
-                if (channels > 1)
-                {
-                    row[off + 1] = q;
-                }
-
-                if (channels > 2)
-                {
-                    row[off + 2] = q;
                 }
             }
         }
@@ -3502,104 +3409,43 @@ public static partial class HeifCoder
         return (ushort)((q * 65535u + (uint)max / 2) / (uint)max);
     }
 
-    private static ushort Q16(double n) => (ushort)Math.Clamp((int)Math.Round(n * 65535.0), 0, 65535);
-
-    private static byte[] EncodeAv1IntraFrame(ImageFrame image)
-    {
-        int w = (int)image.Columns;
-        int h = (int)image.Rows;
-        int imgChannels = image.NumberOfChannels;
-
-        var obus = new List<byte>();
-
-        // OBU: Sequence Header
-        var seqHeader = new List<byte>();
-        var shBits = new SimpleBitWriter();
-        shBits.Write(3, 0); // seq_profile = 0 (main)
-        shBits.Write(1, 1); // still_picture = true
-        shBits.Write(1, 1); // reduced_still_picture_header = true
-        shBits.Write(5, 0); // seq_level_idx = 0
-
-        int wBits = BitsNeeded(w - 1);
-        int hBits = BitsNeeded(h - 1);
-        shBits.Write(4, (uint)(wBits - 1));
-        shBits.Write(4, (uint)(hBits - 1));
-        shBits.Write(wBits, (uint)(w - 1));
-        shBits.Write(hBits, (uint)(h - 1));
-
-        shBits.Write(1, 0); // use_128_intra_default = false
-        shBits.Write(1, 0); // enable_filter_intra = false
-        shBits.Write(1, 0); // enable_intra_edge_filter = false
-        shBits.Write(1, 0); // enable_superres = false
-        shBits.Write(1, 0); // enable_cdef = false
-        shBits.Write(1, 0); // enable_restoration = false
-        // Color config
-        shBits.Write(1, 0); // high_bitdepth = false (8-bit)
-        shBits.Write(1, 0); // mono_chrome = false
-        shBits.Write(1, 0); // color_description_present = false
-        shBits.Write(1, 0); // color_range = studio
-        shBits.Write(2, 0); // subsampling_x, subsampling_y = 0,0 (4:4:4)
-        shBits.Write(1, 0); // film_grain_params_present = false
-        shBits.Flush();
-
-        byte[] seqData = shBits.GetBytes();
-        WriteObu(obus, 1, seqData); // OBU_SEQUENCE_HEADER
-
-        // OBU: Frame (simplified intra-only with DC prediction)
-        int blockW = (w + 7) / 8;
-        int blockH = (h + 7) / 8;
-
-        // Convert to YUV and encode DC values per 8x8 block
-        var frameBytes = new List<byte>();
-        byte[][] blockDc = new byte[3][];
-        for (int plane = 0;plane < 3;plane++)
-        {
-            blockDc[plane] = new byte[blockW * blockH];
-        }
-
-        for (int by = 0;by < blockH;by++)
-        {
-            for (int bx = 0;bx < blockW;bx++)
-            {
-                double sumY = 0, sumU = 0, sumV = 0;
-                int count = 0;
-                for (int dy = 0;dy < 8 && by * 8 + dy < h;dy++)
-                {
-                    var row = image.GetPixelRow(by * 8 + dy);
-                    for (int dx = 0;dx < 8 && bx * 8 + dx < w;dx++)
-                    {
-                        int x = bx * 8 + dx;
-                        int off = x * imgChannels;
-                        byte r = Quantum.ScaleToByte(row[off]);
-                        byte g = imgChannels > 1 ? Quantum.ScaleToByte(row[off + 1]) : r;
-                        byte b = imgChannels > 2 ? Quantum.ScaleToByte(row[off + 2]) : r;
-
-                        sumY += 0.299 * r + 0.587 * g + 0.114 * b;
-                        sumU += -0.169 * r - 0.331 * g + 0.500 * b + 128;
-                        sumV += 0.500 * r - 0.419 * g - 0.081 * b + 128;
-                        count++;
-                    }
-                }
-                int idx = by * blockW + bx;
-                blockDc[0][idx] = (byte)Math.Clamp(sumY / count, 0, 255);
-                blockDc[1][idx] = (byte)Math.Clamp(sumU / count, 0, 255);
-                blockDc[2][idx] = (byte)Math.Clamp(sumV / count, 0, 255);
-            }
-        }
-
-        for (int plane = 0;plane < 3;plane++)
-        {
-            frameBytes.AddRange(blockDc[plane]);
-        }
-
-        WriteObu(obus, 6, frameBytes.ToArray()); // OBU_FRAME
-
-        return obus.ToArray();
-    }
-
     #endregion
 
     #region HEVC Intra Frame Codec
+
+    // An HEVC alpha auxiliary image (HEIC): its luma plane is the alpha, taken as is (libheif).
+    private static void ApplyHevcAlpha(ReadOnlySpan<byte> codedData, ImageFrame frame, int w, int h, HeifContainer c, int id)
+    {
+        byte[] hvcC = c.Property(id, "hvcC") is { } hp ? c.Data.AsSpan(hp.Off, hp.Len).ToArray()
+            : throw new InvalidDataException("HEVC alpha item without hvcC.");
+        var decoder = new Hevc.HevcDecoder();
+        decoder.Initialize(hvcC);
+        using var yuv = decoder.Decode(codedData, 0, isKeyframe: true)
+            ?? throw new InvalidDataException("HEVC alpha decode produced no frame.");
+        int shift = yuv.Format == Hevc.PixelFormat.Yuv420P12 ? 4 : yuv.Format == Hevc.PixelFormat.Yuv420P10 ? 2 : 0;
+        if (!frame.HasAlpha) frame.SetAlpha(true);
+        int nch = frame.NumberOfChannels, aOff = nch - 1;
+        ReadOnlySpan<byte> yp = yuv.YPlane.Span;
+        for (int y = 0; y < h; y++)
+        {
+            var row = frame.GetPixelRowForWrite(y);
+            for (int x = 0; x < w; x++)
+            {
+                int v;
+                if (shift == 0)
+                {
+                    v = yp[(y * yuv.YStride) + x] * 257;
+                }
+                else
+                {
+                    int o = ((y * yuv.YStride) + x) * 2;
+                    int s16 = yp[o] | (yp[o + 1] << 8);
+                    v = (int)(0.5 + s16 * 65535.0 / ((1 << (8 + shift)) - 1));
+                }
+                row[(x * nch) + aOff] = (ushort)v;
+            }
+        }
+    }
 
     private static void DecodeHevcIntraFrame(ReadOnlySpan<byte> codedData, ImageFrame frame, byte[] hvcC, int matrixCoeffs, bool fullRange)
     {
@@ -3620,250 +3466,13 @@ public static partial class HeifCoder
             frame, w, h, channels, tenBit, shift, matrixCoeffs == 1, fullRange);
     }
 
-    private static byte[] EncodeHevcIntraFrame(ImageFrame image)
-    {
-        // Simplified HEVC intra encoding: DC-only prediction per 8x8 CTU
-        int w = (int)image.Columns;
-        int h = (int)image.Rows;
-        int imgChannels = image.NumberOfChannels;
-        int blockW = (w + 7) / 8;
-        int blockH = (h + 7) / 8;
-
-        var output = new List<byte>();
-
-        // VPS NAL unit (minimal)
-        byte[] vps = [ 0x40, 0x01, 0x0C, 0x01, 0xFF, 0xFF, 0x01, 0x60, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 ];
-        WriteNalUnit(output, vps);
-
-        // SPS NAL unit (minimal with dimensions)
-        var sps = new List<byte>();
-        sps.AddRange(new byte[] { 0x42, 0x01, 0x01 }); // NAL header + profile
-        sps.Add(0x01); // general_profile_space
-        // Encode width/height in SPS (simplified)
-        sps.Add((byte)(w >> 8));
-        sps.Add((byte)(w & 0xFF));
-        sps.Add((byte)(h >> 8));
-        sps.Add((byte)(h & 0xFF));
-        WriteNalUnit(output, sps.ToArray());
-
-        // PPS NAL unit (minimal)
-        byte[] pps = [ 0x44, 0x01, 0xC0 ];
-        WriteNalUnit(output, pps);
-
-        // IDR slice with DC-coded blocks
-        var slice = new List<byte>();
-        slice.AddRange(new byte[] { 0x26, 0x01 }); // NAL header (IDR_W_RADL)
-
-        // Encode Y, U, V DC blocks
-        for (int plane = 0;plane < 3;plane++)
-        {
-            for (int by = 0;by < blockH;by++)
-            {
-                for (int bx = 0;bx < blockW;bx++)
-                {
-                    double sum = 0;
-                    int count = 0;
-                    for (int dy = 0;dy < 8 && by * 8 + dy < h;dy++)
-                    {
-                        var row = image.GetPixelRow(by * 8 + dy);
-                        for (int dx = 0;dx < 8 && bx * 8 + dx < w;dx++)
-                        {
-                            int x = bx * 8 + dx;
-                            int off = x * imgChannels;
-                            byte r = Quantum.ScaleToByte(row[off]);
-                            byte g = imgChannels > 1 ? Quantum.ScaleToByte(row[off + 1]) : r;
-                            byte b = imgChannels > 2 ? Quantum.ScaleToByte(row[off + 2]) : r;
-
-                            sum += plane switch
-                            {
-                                0 => 0.299 * r + 0.587 * g + 0.114 * b,
-                                1 => -0.169 * r - 0.331 * g + 0.500 * b + 128,
-                                _ => 0.500 * r - 0.419 * g - 0.081 * b + 128
-                            };
-                            count++;
-                        }
-                    }
-                    slice.Add((byte)Math.Clamp(sum / count, 0, 255));
-                }
-            }
-        }
-
-        WriteNalUnit(output, slice.ToArray());
-
-        return output.ToArray();
-    }
-
     #endregion
 
     #region ISOBMFF Helpers
 
-    private static void WriteFtypBox(List<byte> output, string brand)
-    {
-        byte[] data = new byte[8];
-        Encoding.ASCII.GetBytes(brand, data.AsSpan(0, 4)); // major_brand
-        // minor_version = 0
-        Encoding.ASCII.GetBytes(brand, data.AsSpan(4, 4)); // compatible_brand
-        WriteBox(output, "ftyp", data);
-    }
-
-    private static void WriteMetaBox(List<byte> output, int w, int h, int dataLength,
-        HeifContainerType containerType)
-    {
-        var meta = new List<byte>();
-        meta.AddRange(new byte[4]); // version + flags
-
-        // hdlr (handler) box
-        var hdlr = new List<byte>();
-        hdlr.AddRange(new byte[4]); // version + flags
-        hdlr.AddRange(new byte[4]); // pre_defined
-        hdlr.AddRange(Encoding.ASCII.GetBytes("pict")); // handler_type
-        hdlr.AddRange(new byte[12]); // reserved
-        hdlr.Add(0); // name (null terminated)
-        WriteBoxTo(meta, "hdlr", hdlr.ToArray());
-
-        // pitm (primary item) box
-        var pitm = new List<byte>();
-        pitm.AddRange(new byte[4]); // version + flags
-        pitm.Add(0);
-        pitm.Add(1); // item_ID = 1
-        WriteBoxTo(meta, "pitm", pitm.ToArray());
-
-        // iprp (item properties) box
-        var iprp = new List<byte>();
-        var ipco = new List<byte>();
-
-        // ispe (image spatial extents)
-        byte[] ispe = new byte[12];
-        // version + flags = 0
-        BinaryPrimitives.WriteUInt32BigEndian(ispe.AsSpan(4), (uint)w);
-        BinaryPrimitives.WriteUInt32BigEndian(ispe.AsSpan(8), (uint)h);
-        WriteBoxTo(ipco, "ispe", ispe);
-
-        WriteBoxTo(iprp, "ipco", ipco.ToArray());
-
-        // ipma (item property association)
-        byte[] ipma = [ 0, 0, 0, 0, 0, 1, 0, 1, 1, 0x81 ]; // item 1, 1 association, property 1
-        WriteBoxTo(iprp, "ipma", ipma);
-
-        WriteBoxTo(meta, "iprp", iprp.ToArray());
-
-        // iloc (item location) box
-        var iloc = new List<byte>();
-        iloc.AddRange(new byte[] { 0, 0, 0, 0 }); // version + flags
-        iloc.Add(0x44); // offset_size=4, length_size=4
-        iloc.Add(0x00); // base_offset_size=0, index_size=0
-        iloc.Add(0);
-        iloc.Add(1); // item_count = 1
-        iloc.Add(0);
-        iloc.Add(1); // item_ID = 1
-        iloc.Add(0);
-        iloc.Add(0); // data_reference_index = 0
-        iloc.Add(0);
-        iloc.Add(1); // extent_count = 1
-        // extent_offset (4 bytes) — offset within mdat data
-        byte[] offBytes = new byte[4];
-        BinaryPrimitives.WriteUInt32BigEndian(offBytes, 0);
-        iloc.AddRange(offBytes);
-        // extent_length
-        byte[] lenBytes = new byte[4];
-        BinaryPrimitives.WriteUInt32BigEndian(lenBytes, (uint)dataLength);
-        iloc.AddRange(lenBytes);
-        WriteBoxTo(meta, "iloc", iloc.ToArray());
-
-        WriteBox(output, "meta", meta.ToArray());
-    }
-
-    private static void WriteBox(List<byte> output, string type, byte[] data)
-    {
-        byte[] header = new byte[8];
-        BinaryPrimitives.WriteUInt32BigEndian(header, (uint)(8 + data.Length));
-        Encoding.ASCII.GetBytes(type, header.AsSpan(4, 4));
-        output.AddRange(header);
-        output.AddRange(data);
-    }
-
-    private static void WriteBoxTo(List<byte> target, string type, byte[] data)
-    {
-        byte[] header = new byte[8];
-        BinaryPrimitives.WriteUInt32BigEndian(header, (uint)(8 + data.Length));
-        Encoding.ASCII.GetBytes(type, header.AsSpan(4, 4));
-        target.AddRange(header);
-        target.AddRange(data);
-    }
-
-    private static void WriteNalUnit(List<byte> output, byte[] nal)
-    {
-        byte[] len = new byte[4];
-        BinaryPrimitives.WriteUInt32BigEndian(len, (uint)nal.Length);
-        output.AddRange(len);
-        output.AddRange(nal);
-    }
-
-    private static void WriteObu(List<byte> output, int obuType, byte[] data)
-    {
-        // OBU header: type(4 bits) | has_extension(1) | has_size(1) | reserved(1)
-        byte header = (byte)((obuType << 3) | 0x02); // has_size = true
-        output.Add(header);
-        // LEB128 size
-        WriteLeb128(output, data.Length);
-        output.AddRange(data);
-    }
-
-    private static void WriteLeb128(List<byte> output, int value)
-    {
-        do
-        {
-            byte b = (byte)(value & 0x7F);
-            value >>= 7;
-            if (value > 0)
-            {
-                b |= 0x80;
-            }
-
-            output.Add(b);
-        }
-        while (value > 0);
-    }
-
-    private static long ReadVarInt(byte[] data, int offset, int size)
-    {
-        if (size == 0)
-        {
-            return 0;
-        }
-
-        if (size == 2 && offset + 2 <= data.Length)
-        {
-            return BinaryPrimitives.ReadUInt16BigEndian(data.AsSpan(offset));
-        }
-
-        if (size == 4 && offset + 4 <= data.Length)
-        {
-            return BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(offset));
-        }
-
-        if (size == 8 && offset + 8 <= data.Length)
-        {
-            return (long)BinaryPrimitives.ReadUInt64BigEndian(data.AsSpan(offset));
-        }
-
-        return 0;
-    }
-
     private static bool IsAvifBrand(string brand) => AvifBrands.Any(b => brand.StartsWith(b));
 
     private static bool IsHeicBrand(string brand) => HeicBrands.Any(b => brand.StartsWith(b));
-
-    private static int BitsNeeded(int value)
-    {
-        int bits = 1;
-        while ((1 << bits) <= value)
-        {
-            bits++;
-        }
-
-        return bits;
-    }
 
     #endregion
 
@@ -3906,5 +3515,67 @@ public static partial class HeifCoder
     }
 
     #endregion
-}
 
+    // Grey source -> 4:0:0 luma (Y = the grey value; limited range maps it into [16, 235] << (bd - 8)).
+    private static ushort[] GreyLuma(double[] r, int w, int h, int bd, Av1.Av1ObuWriter.Av1ColorDesc color)
+    {
+        int max = (1 << bd) - 1;
+        var luma = new ushort[w * h];
+        for (int i = 0; i < luma.Length; i++)
+            luma[i] = (ushort)Math.Clamp((int)Math.Round(color.FullRange ? r[i] : r[i] / max * (219 << (bd - 8)) + (16 << (bd - 8))), 0, max);
+        return luma;
+    }
+
+    private static void RgbToYuvAvif(double[] r, double[] g, double[] b, int w, int h, int bd, Av1.Av1PixelLayout layout,
+        Av1.Av1ObuWriter.Av1ColorDesc color, out ushort[] y, out ushort[] u, out ushort[] v)
+    {
+        int max = (1 << bd) - 1;
+        bool full = color.FullRange;
+        double biasY = full ? 0 : 16 << (bd - 8), rangeY = full ? max : 219 << (bd - 8);
+        double biasUV = 1 << (bd - 1), rangeUV = full ? max : 224 << (bd - 8);
+        int mc = color.Matrix;
+        (double kr, double kb) = mc == 12 ? ChromaDerivedKrKb(color.Primaries) : MatrixKrKb(mc);
+        double kg = 1 - kr - kb;
+        int ssX = layout == Av1.Av1PixelLayout.I444 ? 0 : 1, ssY = layout == Av1.Av1PixelLayout.I420 ? 1 : 0;
+        int cw = (w + ssX) >> ssX, chh = (h + ssY) >> ssY;
+        y = new ushort[w * h];
+        u = new ushort[cw * chh];
+        v = new ushort[cw * chh];
+        var uf = new double[cw * chh];
+        var vf = new double[cw * chh];
+        var cnt = new int[cw * chh];
+        int rgbMax = mc == 16 ? (1 << (bd - 2)) - 1 : mc == 17 ? (1 << (bd - 1)) - 1 : max;
+        for (int yy = 0; yy < h; yy++)
+        {
+            for (int xx = 0; xx < w; xx++)
+            {
+                int i = yy * w + xx;
+                double R = r[i] / max, G = g[i] / max, B = b[i] / max, Y, U, V;
+                if (mc == 0) { Y = G; U = B; V = R; }
+                else if (mc == 8) { Y = 0.5 * G + 0.25 * (R + B); U = 0.5 * G - 0.25 * (R + B); V = 0.5 * (R - B); }
+                else if (mc is 16 or 17)
+                {
+                    int Ri = (int)Math.Round(Math.Clamp(R * rgbMax, 0, rgbMax)), Gi = (int)Math.Round(Math.Clamp(G * rgbMax, 0, rgbMax));
+                    int Bi = (int)Math.Round(Math.Clamp(B * rgbMax, 0, rgbMax));
+                    int co = Ri - Bi, tt = Bi + (co >> 1), cg = Gi - tt;
+                    Y = (tt + (cg >> 1)) / rangeY; U = cg / rangeUV; V = co / rangeUV;
+                }
+                else { Y = kr * R + kg * G + kb * B; U = (B - Y) / (2 * (1 - kb)); V = (R - Y) / (2 * (1 - kr)); }
+                y[i] = (ushort)Math.Clamp((int)Math.Round(Y * rangeY + biasY), 0, max);
+                int ci = (yy >> ssY) * cw + (xx >> ssX);
+                uf[ci] += U;
+                vf[ci] += V;
+                cnt[ci]++;
+            }
+        }
+
+        // Identity codes chroma planes with the luma range (H.273: G, B, R are all "luma-like").
+        double cRange = mc == 0 ? rangeY : rangeUV, cBias = mc == 0 ? biasY : biasUV;
+        for (int i = 0; i < cw * chh; i++)
+        {
+            int n = cnt[i] > 0 ? cnt[i] : 1;
+            u[i] = (ushort)Math.Clamp((int)Math.Round(uf[i] / n * cRange + cBias), 0, max);
+            v[i] = (ushort)Math.Clamp((int)Math.Round(vf[i] / n * cRange + cBias), 0, max);
+        }
+    }
+}
