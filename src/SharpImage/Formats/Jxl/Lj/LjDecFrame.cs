@@ -202,10 +202,7 @@ internal sealed partial class LjFrameDecoder
         LjProf.Mark("frame start");
         ProcessDcGlobal(DcGlobal());
         LjProf.Mark("dc global");
-        for (int g = 0; g < Fd.NumDcGroups; g++)
-        {
-            ProcessDcGroup(g, DcGroup(g));
-        }
+        RunParallel(Fd.NumDcGroups, g => ProcessDcGroup(g, DcGroup(g)));
 
         LjProf.Mark("dc groups");
         PreparePipeline();
@@ -213,7 +210,7 @@ internal sealed partial class LjFrameDecoder
         LjProf.Mark("finalize dc");
         ProcessAcGlobal(AcGlobal());
         LjProf.Mark("ac global");
-        for (int g = 0; g < Fd.NumGroups; g++)
+        RunParallel(Fd.NumGroups, g =>
         {
             var passReaders = new LjBitReader[numPasses];
             for (int p = 0; p < numPasses; p++)
@@ -222,7 +219,7 @@ internal sealed partial class LjFrameDecoder
             }
 
             ProcessAcGroup(g, passReaders);
-        }
+        });
 
         foreach (LjBitReader r in readers)
         {
@@ -252,6 +249,29 @@ internal sealed partial class LjFrameDecoder
         if (dcFrameStage != null)
         {
             st.DcFrames[Fh.DcLevel - 1] = new LjImage3F(dcFrameStage.Planes[0], dcFrameStage.Planes[1], dcFrameStage.Planes[2]);
+        }
+    }
+
+    /// <summary>Runs independent group jobs on the thread pool; a decode error surfaces as itself, not as an aggregate.</summary>
+    internal static void RunParallel(int count, Action<int> body)
+    {
+        if (count <= 1)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                body(i);
+            }
+
+            return;
+        }
+
+        try
+        {
+            System.Threading.Tasks.Parallel.For(0, count, body);
+        }
+        catch (AggregateException ae) when (ae.InnerExceptions.Count > 0)
+        {
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ae.InnerExceptions[0]).Throw();
         }
     }
 
@@ -706,7 +726,7 @@ internal sealed partial class LjFrameDecoder
             }
         }
 
-        usedAcs |= localUsedAcs;
+        System.Threading.Interlocked.Or(ref usedAcs, localUsedAcs);
         if (Fh.LoopFilter.EpfIters > 0)
         {
             ComputeSigma(r);
@@ -1084,8 +1104,7 @@ internal sealed partial class LjFrameDecoder
                 int absTx = tx + (blockRect.X0 / 8);
                 sbyte ytox = cmap.YtoxMap.Data[cmap.YtoxMap.Row(ty) + absTx];
                 sbyte ytob = cmap.YtobMap.Data[cmap.YtobMap.Row(ty) + absTx];
-                currentYtox = ytox;
-                currentYtob = ytob;
+
                 // YtoXRatio / YtoBRatio inlined into AVX2 code: clang contracts base + factor * scale into an FMA.
                 float xCcMul = MathF.FusedMultiplyAdd(ytox, cmap.ColorScale, cmap.BaseCorrelationX);
                 float bCcMul = MathF.FusedMultiplyAdd(ytob, cmap.ColorScale, cmap.BaseCorrelationB);
@@ -1126,7 +1145,7 @@ internal sealed partial class LjFrameDecoder
 
                     if (JpegData != null)
                     {
-                        WriteJpegBlock(raw, bx, by, sbx, sby, hshift, vshift, r, absTx, qblock, size);
+                        WriteJpegBlock(raw, bx, by, sbx, sby, hshift, vshift, r, ytox, ytob, qblock, size);
                     }
                     else
                     {
@@ -1137,6 +1156,11 @@ internal sealed partial class LjFrameDecoder
                         int mOff = matrices.MatrixOffset(raw, 0);
                         float[] table = matrices.Table;
                         int cov = LjDecTransforms.CoveredBlocksX[raw] * LjDecTransforms.CoveredBlocksY[raw];
+                        if (LjSimd.Enabled)
+                        {
+                            LjSimd.DequantBlock(table, mOff, size, cov * 64, sdx, sdy, sdb, qblock, block, biases, xCcMul, bCcMul);
+                        }
+                        else
                         for (int k = 0; k < cov * 64; k++)
                         {
                             float xMul = table[mOff + k] * sdx;
@@ -1184,9 +1208,9 @@ internal sealed partial class LjFrameDecoder
         }
     }
 
-    private int[]? qblockBuf;
-    private float[]? blockBuf;
-    private float[]? scratchBuf;
+    [ThreadStatic] private static int[]? qblockBuf;
+    [ThreadStatic] private static float[]? blockBuf;
+    [ThreadStatic] private static float[]? scratchBuf;
 
     /// <summary>DecodeACVarBlock.</summary>
     private void DecodeAcVarBlock(int ctxOffsetP, int log2CoveredBlocks, int[] rowNzeros, int rowOff, int topOff, int nzerosStride, int c, int bx,
@@ -1436,7 +1460,7 @@ internal sealed partial class LjFrameDecoder
 
         if (LjCe.TfIsSrgb(ce))
         {
-            return new LjFromLinearStage(LjTf.SrgbFromLinear);
+            return new LjFromLinearStage(LjTf.SrgbFromLinear, null, simdKind: 1);
         }
 
         if (LjCe.TfIsPq(ce))
@@ -1451,12 +1475,12 @@ internal sealed partial class LjFrameDecoder
 
         if (LjCe.TfIs709(ce))
         {
-            return new LjFromLinearStage(LjTf.Rec709FromLinear);
+            return new LjFromLinearStage(LjTf.Rec709FromLinear, null, simdKind: 2);
         }
 
         if (ce.Tf.HaveGamma || LjCe.TfIsDci(ce))
         {
-            return new LjFromLinearStage(LjTf.Gamma(oe.InverseGamma));
+            return new LjFromLinearStage(LjTf.Gamma(oe.InverseGamma), null, simdKind: 3, inverseGamma: oe.InverseGamma);
         }
 
         throw LjDec.Fail("Invalid target encoding");

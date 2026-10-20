@@ -1245,7 +1245,6 @@ internal sealed partial class LjFrameDecoder
     private bool jpegIsGray;
     private int[] jpegDcoff = new int[3];
     private int[] scaledQtable = new int[64 * 3];
-    private sbyte currentYtox, currentYtob;
 
     private void InitJpegOutput()
     {
@@ -1362,7 +1361,7 @@ internal sealed partial class LjFrameDecoder
         }
     }
 
-    private void WriteJpegBlock(int raw, int bx, int by, int[] sbx, int[] sby, int[] hshift, int[] vshift, LjRect[] r, int absTx, int[] qblock, int size)
+    private void WriteJpegBlock(int raw, int bx, int by, int[] sbx, int[] sby, int[] hshift, int[] vshift, LjRect[] r, sbyte ytox, sbyte ytob, int[] qblock, int size)
     {
         if (raw != LjDecTransforms.Dct)
         {
@@ -1396,8 +1395,8 @@ internal sealed partial class LjFrameDecoder
                 }
             }
 
-            cmX = currentYtox;
-            cmB = currentYtob;
+            cmX = ytox;
+            cmB = ytob;
             if (!is444 || (cmX == 0 && cmB == 0))
             {
                 for (int i = 0; i < 64; i++)

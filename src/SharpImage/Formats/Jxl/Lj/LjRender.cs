@@ -224,6 +224,11 @@ internal sealed class LjRenderPipeline
                 throw LjDec.Fail("empty stage input");
             }
 
+            stage.SetInputSizes(inX, inY);
+            int borderY = stage.BorderY;
+            const int rowsPerTask = 16;
+            LjFrameDecoder.RunParallel((ysize + rowsPerTask - 1) / rowsPerTask, task =>
+            {
             var inputRows = new LjStageRows(numC);
             var outputRows = new LjStageRows(numC);
             for (int c = 0; c < numC; c++)
@@ -234,9 +239,7 @@ internal sealed class LjRenderPipeline
                 outputRows.Off[c] = new int[1 << stage.ShiftY];
             }
 
-            stage.SetInputSizes(inX, inY);
-            int borderY = stage.BorderY;
-            for (int y = 0; y < ysize; y++)
+            for (int y = task * rowsPerTask; y < Math.Min(ysize, (task + 1) * rowsPerTask); y++)
             {
                 for (int c = 0; c < numC; c++)
                 {
@@ -270,6 +273,7 @@ internal sealed class LjRenderPipeline
 
                 stage.ProcessRow(inputRows, outputRows, xsize, 0, y);
             }
+            });
 
             for (int c = 0; c < numC; c++)
             {
@@ -450,6 +454,12 @@ internal sealed class LjGaborishStage : LjStage
             (float[] b, int bo) = In(input, c, 1);
             (float[] o, int oo) = Out(output, c, 0);
             float w0 = weights[3 * c], w1 = weights[(3 * c) + 1], w2 = weights[(3 * c) + 2];
+            if (LjSimd.Enabled)
+            {
+                LjSimd.GaborishRow(t, to, m, mo, b, bo, o, oo, xsize, w0, w1, w2);
+                continue;
+            }
+
             for (int x = 0; x < xsize; x++)
             {
                 float sum0 = m[mo + x];
@@ -511,6 +521,12 @@ internal sealed class LjEpfStage : LjStage
         (float[] ox, int oxo) = Out(output, 0, 0);
         (float[] oy, int oyo) = Out(output, 1, 0);
         (float[] ob, int obo) = Out(output, 2, 0);
+        if (LjSimd.Enabled)
+        {
+            LjSimd.EpfRow(pass, ra, ro, ox, oxo, oy, oyo, ob, obo, xsize, xpos, sigma.Data, rowSigma, sm, bsm, lf.EpfChannelScale, borderRow);
+            return;
+        }
+
         Span<float> sads = stackalloc float[12];
         for (int x = 0; x < xsize; x++)
         {
@@ -795,7 +811,12 @@ internal sealed class LjXybStage : LjStage
             return;
         }
 
-        float[] m = p.InverseOpsinMatrix;
+        if (LjSimd.Enabled)
+        {
+            LjSimd.XybRow(a0, o0, a1, o1, a2, o2, xsize, p);
+            return;
+        }
+
         for (int x = 0; x < xsize; x++)
         {
             LjOpsinParams.XybToRgb(p, a0[o0 + x], a1[o1 + x], a2[o2 + x], out float r, out float g, out float b);
@@ -837,11 +858,15 @@ internal sealed class LjFromLinearStage : LjStage
 {
     private readonly Func<float, float>? op;
     private readonly LjHlgOotf? hlgOotf;
+    private readonly int simdKind;   // 1 sRGB, 2 Rec.709, 3 gamma
+    private readonly float inverseGamma;
 
-    public LjFromLinearStage(Func<float, float>? op, LjHlgOotf? hlgOotf = null)
+    public LjFromLinearStage(Func<float, float>? op, LjHlgOotf? hlgOotf = null, int simdKind = 0, float inverseGamma = 0)
     {
         this.op = op;
         this.hlgOotf = hlgOotf;
+        this.simdKind = simdKind;
+        this.inverseGamma = inverseGamma;
     }
 
     public override LjChannelMode GetChannelMode(int c) => c < 3 ? LjChannelMode.InPlace : LjChannelMode.Ignored;
@@ -856,6 +881,27 @@ internal sealed class LjFromLinearStage : LjStage
         (float[] a0, int o0) = In(input, 0, 0);
         (float[] a1, int o1) = In(input, 1, 0);
         (float[] a2, int o2) = In(input, 2, 0);
+        if (LjSimd.Enabled && simdKind != 0)
+        {
+            foreach ((float[] a, int o) in new[] { (a0, o0), (a1, o1), (a2, o2) })
+            {
+                if (simdKind == 1)
+                {
+                    LjSimd.SrgbFromLinearRow(a, o, xsize);
+                }
+                else if (simdKind == 2)
+                {
+                    LjSimd.Rec709FromLinearRow(a, o, xsize);
+                }
+                else
+                {
+                    LjSimd.GammaFromLinearRow(a, o, xsize, inverseGamma);
+                }
+            }
+
+            return;
+        }
+
         for (int x = 0; x < xsize; x++)
         {
             float r = a0[o0 + x], g = a1[o1 + x], b = a2[o2 + x];

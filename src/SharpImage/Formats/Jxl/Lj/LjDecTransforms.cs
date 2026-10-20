@@ -3,6 +3,8 @@
 // arithmetic on several columns at once, so a scalar per-column evaluation with fused multiply-adds where libjxl uses
 // MulAdd/NegMulAdd gives identical results.
 using System;
+using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 
 namespace SharpImage.Formats.Jxl.Lj;
 
@@ -119,11 +121,80 @@ internal static class LjDecTransforms
 
     private static float[] Col => colBuf ??= new float[512];
 
+    /// <summary>IDCT1DImpl&lt;N&gt; on 8 columns at once (one Vector256 per row), as libjxl's AVX2 build runs it.</summary>
+    private static void Idct1DV(int n, Span<Vector256<float>> from, Span<Vector256<float>> to, Span<Vector256<float>> tmp)
+    {
+        if (n == 1)
+        {
+            to[0] = from[0];
+            return;
+        }
+
+        if (n == 2)
+        {
+            Vector256<float> a = from[0], b = from[1];
+            to[0] = a + b;
+            to[1] = a - b;
+            return;
+        }
+
+        int h = n / 2;
+        for (int i = 0; i < h; i++)
+        {
+            tmp[i] = from[2 * i];
+        }
+
+        for (int i = h; i < n; i++)
+        {
+            tmp[i] = from[(2 * (i - h)) + 1];
+        }
+
+        Span<Vector256<float>> lo = tmp[..h], hi = tmp.Slice(h, h), sub = tmp[n..];
+        Idct1DV(h, lo, lo, sub);
+        for (int i = h - 1; i > 0; i--)
+        {
+            hi[i] = hi[i] + hi[i - 1];
+        }
+
+        hi[0] = hi[0] * Vector256.Create(Sqrt2);
+        Idct1DV(h, hi, hi, sub);
+        float[] wc = LjDctScales.Wc(n);
+        for (int i = 0; i < h; i++)
+        {
+            Vector256<float> mul = Vector256.Create(wc[i]);
+            Vector256<float> in1 = lo[i], in2 = hi[i];
+            to[i] = Fma.MultiplyAdd(mul, in2, in1);
+            to[n - i - 1] = Fma.MultiplyAddNegated(mul, in2, in1);
+        }
+    }
+
+    [ThreadStatic] private static Vector256<float>[]? vecBuf;
+
     /// <summary>IDCT1D&lt;N, M&gt;: M columns, each an N-point inverse DCT.</summary>
     private static void Idct1DCols(int n, int m, float[] from, int fo, int fs, float[] to, int tOff, int ts)
     {
+        int j0 = 0;
+        if (LjSimd.Enabled && m >= 8)
+        {
+            Vector256<float>[] vb = vecBuf ??= new Vector256<float>[256 * 4];
+            Span<Vector256<float>> data = vb.AsSpan(0, n), tmpv = vb.AsSpan(256, 512);
+            for (; j0 + 8 <= m; j0 += 8)
+            {
+                for (int i = 0; i < n; i++)
+                {
+                    data[i] = Vector256.LoadUnsafe(ref from[fo + (i * fs) + j0]);
+                }
+
+                Idct1DV(n, data, data, tmpv);
+                for (int i = 0; i < n; i++)
+                {
+                    data[i].StoreUnsafe(ref to[tOff + (i * ts) + j0]);
+                }
+            }
+        }
+
         float[] tmp = Tmp;
-        for (int j = 0; j < m; j++)
+        for (int j = j0; j < m; j++)
         {
             Idct1D(n, from, fo + j, fs, to, tOff + j, ts, tmp, 0);
         }
