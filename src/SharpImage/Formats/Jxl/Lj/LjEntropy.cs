@@ -78,6 +78,19 @@ internal sealed class LjLz77Params
         LjFields.WriteU32(w, MinLength, LjU32.Val(3), LjU32.Val(4), LjU32.BitsOffset(2, 5), LjU32.BitsOffset(8, 9));
     }
 
+    public void Read(LjBitReader br)
+    {
+        Enabled = br.ReadBits(1) != 0;
+        if (!Enabled)
+        {
+            return;
+        }
+
+        var v = new LjReadVisitor(br.AsReadFunc());
+        v.U32(LjU32.Val(224), LjU32.Val(512), LjU32.Val(4096), LjU32.BitsOffset(15, 8), 224, ref MinSymbol);
+        v.U32(LjU32.Val(3), LjU32.Val(4), LjU32.BitsOffset(2, 5), LjU32.BitsOffset(8, 9), 3, ref MinLength);
+    }
+
     public int Bits => !Enabled ? 1 : 1 + LjFields.U32Bits(MinSymbol, LjU32.Val(224), LjU32.Val(512), LjU32.Val(4096), LjU32.BitsOffset(15, 8)) +
         LjFields.U32Bits(MinLength, LjU32.Val(3), LjU32.Val(4), LjU32.BitsOffset(2, 5), LjU32.BitsOffset(8, 9));
 }

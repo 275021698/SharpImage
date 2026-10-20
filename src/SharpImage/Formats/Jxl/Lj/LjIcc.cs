@@ -7,20 +7,20 @@ namespace SharpImage.Formats.Jxl.Lj;
 
 internal static class LjIccEncoder
 {
-    private const int IccHeaderSize = 128;
-    private const int NumIccContexts = 41;
-    private const uint SizeLimit = uint.MaxValue >> 2;
+    internal const int IccHeaderSize = 128;
+    internal const int NumIccContexts = 41;
+    internal const uint SizeLimit = uint.MaxValue >> 2;
 
-    private const byte CommandTagUnknown = 1, CommandTagTrc = 2, CommandTagXyz = 3, CommandTagStringFirst = 4;
-    private const byte CommandInsert = 1, CommandShuffle2 = 2, CommandShuffle4 = 3, CommandPredict = 4, CommandXyz = 10, CommandTypeStartFirst = 16;
-    private const byte FlagBitOffset = 64, FlagBitSize = 128;
+    internal const byte CommandTagUnknown = 1, CommandTagTrc = 2, CommandTagXyz = 3, CommandTagStringFirst = 4;
+    internal const byte CommandInsert = 1, CommandShuffle2 = 2, CommandShuffle4 = 3, CommandPredict = 4, CommandXyz = 10, CommandTypeStartFirst = 16;
+    internal const byte FlagBitOffset = 64, FlagBitSize = 128;
 
-    private static readonly string[] TagStrings =
+    internal static readonly string[] TagStrings =
         ["cprt", "wtpt", "bkpt", "rXYZ", "gXYZ", "bXYZ", "kXYZ", "rTRC", "gTRC", "bTRC", "kTRC", "chad", "desc", "chrm", "dmnd", "dmdd", "lumi"];
 
-    private static readonly string[] TypeStrings = ["XYZ ", "desc", "text", "mluc", "para", "curv", "sf32", "gbd "];
+    internal static readonly string[] TypeStrings = ["XYZ ", "desc", "text", "mluc", "para", "curv", "sf32", "gbd "];
 
-    private static readonly byte[] InitialHeaderPrediction =
+    internal static readonly byte[] InitialHeaderPrediction =
     [
         0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, (byte)'m', (byte)'n', (byte)'t', (byte)'r',
         (byte)'R', (byte)'G', (byte)'B', (byte)' ', (byte)'X', (byte)'Y', (byte)'Z', (byte)' ', 0, 0, 0, 0, 0, 0, 0, 0,
@@ -32,10 +32,10 @@ internal static class LjIccEncoder
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ];
 
-    private static uint DecodeUint32(byte[] data, long size, long pos) =>
+    internal static uint DecodeUint32(byte[] data, long size, long pos) =>
         pos + 4 > size ? 0 : (uint)((data[pos] << 24) | (data[pos + 1] << 16) | (data[pos + 2] << 8) | data[pos + 3]);
 
-    private static string DecodeKeyword(byte[] data, long size, long pos) =>
+    internal static string DecodeKeyword(byte[] data, long size, long pos) =>
         pos + 4 > size ? "    " : new string([(char)data[pos], (char)data[pos + 1], (char)data[pos + 2], (char)data[pos + 3]]);
 
     private static void EncodeVarInt(ulong value, List<byte> data)
@@ -49,7 +49,7 @@ internal static class LjIccEncoder
         data.Add((byte)(value & 127));
     }
 
-    private static void ICCPredictHeader(byte[] icc, int size, byte[] header, int pos)
+    internal static void ICCPredictHeader(byte[] icc, int size, byte[] header, int pos)
     {
         if (pos == 8 && size >= 8)
         {
@@ -92,7 +92,7 @@ internal static class LjIccEncoder
         }
     }
 
-    private static byte LinearPredictICCValue(byte[] data, long start, long i, long stride, long width, int order)
+    internal static byte LinearPredictICCValue(byte[] data, long start, long i, long stride, long width, int order)
     {
         long pos = start + i;
         if (width == 1)
@@ -513,7 +513,7 @@ internal static class LjIccEncoder
         return result;
     }
 
-    private static int ByteKind1(byte b)
+    internal static int ByteKind1(byte b)
     {
         if ((b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z'))
         {
@@ -553,7 +553,7 @@ internal static class LjIccEncoder
         return 7;
     }
 
-    private static int ByteKind2(byte b)
+    internal static int ByteKind2(byte b)
     {
         if ((b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z'))
         {
@@ -578,7 +578,7 @@ internal static class LjIccEncoder
         return 4;
     }
 
-    private static int IccAnsContext(int i, byte b1, byte b2) => i <= 128 ? 0 : 1 + ByteKind1(b1) + (ByteKind2(b2) * 8);
+    internal static int IccAnsContext(int i, byte b1, byte b2) => i <= 128 ? 0 : 1 + ByteKind1(b1) + (ByteKind2(b2) * 8);
 
     /// <summary>WriteICC: U64 length of the predicted stream, then its tokens (prefix codes with LZ77).</summary>
     public static void WriteIcc(byte[] icc, LjBitWriter writer)

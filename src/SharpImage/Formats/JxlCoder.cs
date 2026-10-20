@@ -237,7 +237,7 @@ public static class JxlCoder
         return frame;
     }
 
-    private static byte[] FindCodestream(byte[] data)
+    internal static byte[] FindCodestream(byte[] data)
     {
         if (data[0] == 0xFF && data[1] == 0x0A)
         {

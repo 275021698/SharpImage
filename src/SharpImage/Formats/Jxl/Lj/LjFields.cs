@@ -216,6 +216,9 @@ internal static class LjFields
         bundle.VisitFields(new LjReadVisitor(readBits));
     }
 
+    /// <summary>Bundle::Read from a bit reader.</summary>
+    public static void ReadInto(ILjBundle bundle, LjBitReader br) => Read(bundle, br.AsReadFunc());
+
     /// <summary>Bundle::Init / SetDefault: every field takes its default value.</summary>
     public static void LjSetDefault(ILjBundle bundle) => bundle.VisitFields(new LjSetDefaultVisitor());
 }

@@ -169,6 +169,38 @@ internal static class LjMath
         return (yp / yq) + expVal;
     }
 
+    // FastPow2f (base/fast_math-inl.h); `fma` as for FastLog2f.
+    public static float FastPow2f(float x, bool fma)
+    {
+        float floorx = MathF.Floor(x);
+        float exp = BitConverter.Int32BitsToSingle(((int)floorx + 127) << 23);
+        float frac = x - floorx;
+        float num = frac + 1.01749063e+01f;
+        float den;
+        if (fma)
+        {
+            num = MathF.FusedMultiplyAdd(num, frac, 4.88687798e+01f);
+            num = MathF.FusedMultiplyAdd(num, frac, 9.85506591e+01f);
+            num *= exp;
+            den = MathF.FusedMultiplyAdd(frac, 2.10242958e-01f, -2.22328856e-02f);
+            den = MathF.FusedMultiplyAdd(den, frac, -1.94414990e+01f);
+            den = MathF.FusedMultiplyAdd(den, frac, 9.85506633e+01f);
+        }
+        else
+        {
+            num = (num * frac) + 4.88687798e+01f;
+            num = (num * frac) + 9.85506591e+01f;
+            num *= exp;
+            den = (frac * 2.10242958e-01f) + -2.22328856e-02f;
+            den = (den * frac) + -1.94414990e+01f;
+            den = (den * frac) + 9.85506633e+01f;
+        }
+
+        return num / den;
+    }
+
+    public static float FastPowf(float b, float e, bool fma) => FastPow2f(FastLog2f(b, fma) * e, fma);
+
     // Highway SumOfLanes for 8 float lanes on AVX2: swap the 128-bit blocks, then reduce within a block.
     public static float SumOfLanes8(ReadOnlySpan<float> v)
     {
