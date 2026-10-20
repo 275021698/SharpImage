@@ -507,7 +507,7 @@ internal static partial class JxlEncoder
             {
                 int off = x * srcCh;
                 int p = (y * w) + x;
-                if (srcCh == 1)
+                if (srcCh - (image.HasAlpha ? 1 : 0) == 1)
                 {
                     float v = Norm(row[off]);
                     srgb[0][p] = srgb[1][p] = srgb[2][p] = v;

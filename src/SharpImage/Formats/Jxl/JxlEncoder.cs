@@ -183,7 +183,7 @@ internal static partial class JxlEncoder
             {
                 int off = x * srcCh;
                 int p = (y * w) + x;
-                if (srcCh == 1)
+                if (srcCh - (image.HasAlpha ? 1 : 0) == 1)
                 {
                     r[p] = g[p] = b[p] = Quantum.ScaleToDepth(row[off], bits);
                 }
@@ -303,7 +303,7 @@ internal static partial class JxlEncoder
             for (int x = 0; x < w; x++)
             {
                 int off = x * srcCh, p = (y * w) + x;
-                if (srcCh == 1)
+                if (srcCh - (image.HasAlpha ? 1 : 0) == 1)
                 {
                     r[p] = g[p] = b[p] = Quantum.ScaleToDepth(row[off], bits);
                 }
@@ -1962,28 +1962,36 @@ internal static partial class JxlEncoder
 
     private static int PackSigned(int v) => (int)(uint)((v << 1) ^ (v >> 31));
 
-    private static void WriteTree(JxlBitWriter s, int[] tokens)
+    // The tree's values go through the header's hybrid-uint config (split 15): values below 2^15 are their own
+    // token, larger ones (split values of 16-bit images) a token plus extra bits.
+    private static void WriteTree(JxlBitWriter s, int[] values)
     {
+        var packed = new (int Token, int NBits, int Bits)[values.Length];
         int maxv = 0;
-        foreach (int v in tokens)
+        for (int i = 0; i < values.Length; i++)
         {
-            if (v > maxv)
+            packed[i] = PackHybridUint(15, values[i]);
+            if (packed[i].Token > maxv)
             {
-                maxv = v;
+                maxv = packed[i].Token;
             }
         }
 
         long[] f = new long[maxv + 1];
-        foreach (int v in tokens)
+        foreach (var p in packed)
         {
-            f[v]++;
+            f[p.Token]++;
         }
 
         var treeCode = new JxlPrefixCode(f, maxv + 1);
         WriteHistogramsHeader(s, numContexts: 6, treeCode);
-        foreach (int v in tokens)
+        foreach (var p in packed)
         {
-            treeCode.WriteSymbol(s, v);
+            treeCode.WriteSymbol(s, p.Token);
+            if (p.NBits > 0)
+            {
+                s.WriteBits((uint)p.Bits, p.NBits);
+            }
         }
     }
 
@@ -2445,6 +2453,11 @@ internal static partial class JxlEncoder
 
     private static void WriteContextMap(JxlBitWriter s, int[] map, int numClusters)
     {
+        if (map.Length <= 1)
+        {
+            return;  // a single context has no context map in the bitstream (DecodeHistograms reads none)
+        }
+
         if (numClusters <= 1)
         {
             s.WriteBool(true);  // is_simple
