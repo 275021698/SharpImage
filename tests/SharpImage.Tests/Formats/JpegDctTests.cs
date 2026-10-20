@@ -166,7 +166,8 @@ public class JpegDctTests
         byte[] jpeg = ms.ToArray();
 
         byte[] container = JpegXlLossless.Encode(jpeg);
-        await Assert.That(JpegXlLossless.CanDecode(container)).IsTrue();
+        await Assert.That(JxlCoder.CanDecode(container)).IsTrue();          // a standard JPEG XL file
+        await Assert.That(JpegXlLossless.CanDecode(container)).IsFalse();   // not the legacy SJXL container
         byte[] restored = JpegXlLossless.Decode(container);
 
         await Assert.That(restored.Length).IsEqualTo(jpeg.Length);
@@ -210,10 +211,10 @@ public class JpegDctTests
         await Assert.That((int)JpegRecompressionEffort.Balanced).IsNotEqualTo((int)JpegRecompressionEffort.Turbo);
     }
 
-    // The SJXL recompression container is auto-detected by FormatRegistry and decodes to the SAME pixels as
-    // the source JPEG — so a saved .jxl recompression loads transparently for further conversion/resizing.
+    // A recompressed JPEG is a standard JPEG XL file: FormatRegistry detects it as JXL and decodes it with the
+    // libjxl decoder (libjxl's IDCT of the same coefficients, so within rounding of the JPEG decoder's pixels).
     [Test]
-    public async Task Jpeg_Sjxl_LoadsThroughFormatRegistry()
+    public async Task Jpeg_RecompressedJxl_LoadsThroughFormatRegistry()
     {
         using var srcImg = new ImageFrame();
         srcImg.Initialize(80, 64, ColorspaceType.SRGB, false);
@@ -232,27 +233,42 @@ public class JpegDctTests
         using var ms = new System.IO.MemoryStream();
         JpegCoder.Write(srcImg, ms, quality: 88, subsampling: JpegSubsampling.Yuv420);
         byte[] jpeg = ms.ToArray();
-        byte[] sjxl = JpegXlLossless.Encode(jpeg);
+        byte[] jxl = JpegXlLossless.Encode(jpeg);
+        await Assert.That(FormatRegistry.DetectFormat(jxl)).IsEqualTo(ImageFileFormat.JpegXl);
 
-        // FormatRegistry detects the container from its magic and routes it to the SJXL decode path.
-        await Assert.That(FormatRegistry.DetectFormat(sjxl)).IsEqualTo(ImageFileFormat.JpegXlLossless);
-
-        using ImageFrame fromSjxl = FormatRegistry.Read(sjxl);
+        using ImageFrame fromJxl = FormatRegistry.Read(jxl);
         using ImageFrame fromJpeg = FormatRegistry.Read(jpeg);
-        await Assert.That(fromSjxl.Columns).IsEqualTo(fromJpeg.Columns);
-        await Assert.That(fromSjxl.Rows).IsEqualTo(fromJpeg.Rows);
-
-        // Pixels are identical — SJXL reconstructs the exact JPEG, so decoding it gives the JPEG's own pixels.
-        bool pixelsMatch = true;
-        for (int y = 0; y < fromJpeg.Rows && pixelsMatch; y++)
+        await Assert.That(fromJxl.Columns).IsEqualTo(fromJpeg.Columns);
+        await Assert.That(fromJxl.Rows).IsEqualTo(fromJpeg.Rows);
+        int maxDiff = 0;
+        for (int y = 0; y < fromJpeg.Rows; y++)
         {
-            if (!fromSjxl.GetPixelRow(y).SequenceEqual(fromJpeg.GetPixelRow(y)))
+            var a = fromJxl.GetPixelRow(y);
+            var b = fromJpeg.GetPixelRow(y);
+            for (int i = 0; i < a.Length; i++)
             {
-                pixelsMatch = false;
+                maxDiff = Math.Max(maxDiff, Math.Abs((a[i] / 257) - (b[i] / 257)));
             }
         }
 
-        await Assert.That(pixelsMatch).IsTrue();
+        // libjxl's float IDCT and chroma upsampling vs SharpImage's JPEG decoder on this hard synthetic pattern
+        // differ by at most a few levels (exactness against djxl is covered by JxlDecoderConformanceTests).
+        await Assert.That(maxDiff).IsLessThanOrEqualTo(6);
+    }
+
+    // QuickFixMyPics 1.0.10-1.0.11 wrote SharpImage's private SJXL container with a .jxl extension. Those files
+    // must keep loading: FormatRegistry routes them to the SJXL path, which rebuilds the exact source JPEG.
+    [Test]
+    public async Task LegacySjxl_StillDecodes()
+    {
+        string dir = System.IO.Path.Combine(AppContext.BaseDirectory, "TestAssets", "jxl");
+        byte[] sjxl = System.IO.File.ReadAllBytes(System.IO.Path.Combine(dir, "legacy_sjxl_p420.jxl"));
+        byte[] jpeg = System.IO.File.ReadAllBytes(System.IO.Path.Combine(dir, "jpegrecompress", "p420.jpg"));
+        await Assert.That(JpegXlLossless.CanDecode(sjxl)).IsTrue();
+        await Assert.That(FormatRegistry.DetectFormat(sjxl)).IsEqualTo(ImageFileFormat.JpegXlLossless);
+        await Assert.That(JpegXlLossless.Decode(sjxl).AsSpan().SequenceEqual(jpeg)).IsTrue();
+        using ImageFrame img = FormatRegistry.Read(sjxl);
+        await Assert.That(img.Columns).IsGreaterThan(0);
     }
 
     // A real PROGRESSIVE (SOF2) JPEG — multi-scan DC first/refine + AC first/refine with EOBRUN grouping —

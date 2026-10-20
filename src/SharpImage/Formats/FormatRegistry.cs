@@ -40,9 +40,9 @@ public enum ImageFileFormat
     Jpeg2000,
     JpegXl,
 
-    /// <summary>SharpImage's byte-exact lossless JPEG↔JXL recompression container (magic "SJXL"). Decodes back
-    /// to the exact source JPEG's pixels; written only by <see cref="JpegXlLossless.Encode(byte[])"/> from a
-    /// JPEG, so there is no pixel-to-SJXL encode path here.</summary>
+    /// <summary>SharpImage's earlier private lossless JPEG recompression container (magic "SJXL"), which
+    /// QuickFixMyPics 1.0.10-1.0.11 wrote with a .jxl extension. Read-only: it decodes to the exact source JPEG's
+    /// pixels. <see cref="JpegXlLossless.Encode(byte[])"/> now writes standard JPEG XL instead.</summary>
     JpegXlLossless,
     Avif,
     Heic,

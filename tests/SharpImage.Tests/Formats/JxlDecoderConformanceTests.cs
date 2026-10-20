@@ -56,10 +56,11 @@ public class JxlDecoderConformanceTests
             return;
         }
 
-        // Lossy (VarDCT) dequantization uses the CPU's approximate reciprocal (rcpps), as libjxl's AVX2 build does,
-        // and its exact results vary between CPU vendors: the expected hashes are from an AMD Zen 5 machine. On a CPU
-        // whose rcpps agrees with it, any difference is a regression; elsewhere compare per-channel sums closely.
-        await Assert.That(ReciprocalMatchesReferenceCpu()).IsFalse();
+        // libjxl itself is not bit-reproducible across machines: VarDCT dequantization uses the CPU's approximate
+        // reciprocal (rcpps, vendor-specific) and custom XYB parameters go through the C library's cbrtf. The
+        // expected hashes come from djxl on Windows on an AMD Zen 5. Where both agree with that machine any
+        // difference is a regression; elsewhere compare per-channel sums closely.
+        await Assert.That(OnReferencePlatform()).IsFalse();
         var floats = new float[bytes.Length / 4];
         Buffer.BlockCopy(bytes, 0, floats, 0, bytes.Length);
         for (int c = 0; c < nc; c++)
@@ -75,8 +76,14 @@ public class JxlDecoderConformanceTests
         }
     }
 
-    private static bool ReciprocalMatchesReferenceCpu()
+    private static bool OnReferencePlatform()
     {
+        // The MSVC runtime's cbrtf (which djxl links) is not correctly rounded; .NET's MathF.Cbrt reaches the host's.
+        if (BitConverter.SingleToUInt32Bits(MathF.Cbrt(-2.5f)) != 0xBFADB904u || BitConverter.SingleToUInt32Bits(MathF.Cbrt(7.75f)) != 0x3FFD4E18u)
+        {
+            return false;
+        }
+
         if (!System.Runtime.Intrinsics.X86.Sse.IsSupported)
         {
             return false;

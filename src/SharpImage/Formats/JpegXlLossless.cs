@@ -1,14 +1,11 @@
 // Lossless JPEG <-> JXL transcoding (JPEG recompression).
 //
-// A baseline JPEG is parsed into its quantized DCT coefficients + the byte-exact reconstruction data
-// (jbrd: verbatim header/trailer, Huffman tables, sampling, restart interval). The coefficients are stored
-// losslessly using this repo's JXL Modular encoder (frequency-transposed so each DCT position forms its own
-// spatially-coherent sub-image — the DC sub-image is smooth and compresses far better than the raster form),
-// and Decode reverses the process to reproduce the ORIGINAL JPEG byte-for-byte via JpegCoder.RebuildJpeg.
+// Encode writes a standard JPEG XL file: libjxl's lossless JPEG recompression (the JPEG's DCT coefficients as a
+// VarDCT frame plus a jbrd box), byte-identical to cjxl 0.12 at its default effort, which djxl or any JPEG XL
+// decoder with reconstruction support turns back into the original JPEG byte for byte.
 //
-// This is a self-contained SharpImage container (magic "SJXL"): the coefficients are a real JXL codestream,
-// but djxl/jxl-oxide can't reconstruct the JPEG from it — that needs the standard jpeg-mode VarDCT frame +
-// jbrd box (a much larger, external-verify-only subsystem). Byte-exactness here is verified end-to-end locally.
+// Decode rebuilds the original JPEG from such a file, and also from SharpImage's earlier private container
+// (magic "SJXL"), which QuickFixMyPics 1.0.10-1.0.11 wrote with a .jxl extension; those files stay readable.
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
@@ -40,7 +37,7 @@ public static class JpegXlLossless
 {
     private const uint Magic = 0x534A584C; // "SJXL"
 
-    /// <summary>Detects the SharpImage lossless-JPEG container.</summary>
+    /// <summary>Detects SharpImage's earlier private lossless-JPEG container ("SJXL").</summary>
     public static bool CanDecode(ReadOnlySpan<byte> data) =>
         data.Length >= 4 && BinaryPrimitives.ReadUInt32BigEndian(data) == Magic;
 
@@ -50,89 +47,41 @@ public static class JpegXlLossless
     public const int EffortDefault = Jxl.JxlEncoder.JpegEffortDefault;
     public const int EffortMax = Jxl.JxlEncoder.JpegEffortMax;
 
-    /// <summary>Losslessly transcodes a baseline/progressive JPEG to the SharpImage JXL-based recompression
-    /// container at the balanced default effort (favouring compression). Pass a
-    /// <see cref="JpegRecompressionEffort"/> to trade speed against size.</summary>
+    /// <summary>Losslessly recompresses a JPEG into a JPEG XL file (see <see cref="JxlCoder.EncodeFromJpeg"/>).</summary>
     public static byte[] Encode(byte[] jpeg) => Encode(jpeg, EffortDefault);
 
-    /// <summary>Losslessly transcodes a baseline/progressive JPEG to the SharpImage JXL-based recompression
-    /// container at the given effort. Every effort reconstructs the source JPEG byte-for-byte.</summary>
+    /// <summary>Losslessly recompresses a JPEG into a JPEG XL file. Every effort currently produces cjxl's default
+    /// (effort 7) output.</summary>
     public static byte[] Encode(byte[] jpeg, JpegRecompressionEffort effort) => Encode(jpeg, (int)effort);
 
-    /// <summary>Losslessly transcodes a baseline JPEG to the SharpImage JXL-based recompression container.</summary>
-    /// <param name="jpeg">The source baseline/progressive JPEG bytes.</param>
-    /// <param name="effort">Compression effort 1-9 (see <see cref="JpegRecompressionEffort"/>): higher searches
-    /// more coding candidates for a smaller container at more CPU. Every level is byte-exact.</param>
+    /// <summary>Losslessly recompresses a JPEG into a standard JPEG XL file that reconstructs it byte for byte.
+    /// Throws <see cref="NotSupportedException"/> for a JPEG libjxl cannot recompress (arithmetic coding, CMYK,
+    /// 12-bit, unusual sampling) or one whose reconstruction would not be exact.</summary>
+    /// <param name="jpeg">The source JPEG bytes.</param>
+    /// <param name="effort">Compression effort 1-9; every level currently produces cjxl's default output.</param>
     public static byte[] Encode(byte[] jpeg, int effort)
     {
-        JpegDctData d = JpegCoder.ReadDctData(new MemoryStream(jpeg));
+        byte[] jxl = JxlCoder.EncodeFromJpeg(jpeg);
 
-        using var ms = new MemoryStream();
-        var w = new BinaryWriter(ms);
-        w.Write(BinaryPrimitives.ReverseEndianness(Magic));
-
-        // Header/trailer are the verbatim JPEG marker segments (Huffman + quant tables, APPn) — highly
-        // structured and compressible; Brotli them so tiny JPEGs aren't dominated by a raw ~300-500B header.
-        // All the geometry/sampling/table-index/block-grid metadata is DERIVABLE from the header, so it is not
-        // stored here — Decode re-parses it via JpegCoder.PopulateDctMetadata (saves ~66 B per file).
-        WriteCompressedBlob(w, d.HeaderBytes);
-
-        // Trailer is almost always just the 2-byte EOI marker; flag that common case in 1 byte instead of
-        // spending ~10 bytes framing a compressed blob (matters for the near-tie tiny files).
-        bool bareEoi = d.TrailingBytes.Length == 2 && d.TrailingBytes[0] == 0xFF && d.TrailingBytes[1] == 0xD9;
-        w.Write(bareEoi);
-        if (!bareEoi)
-        {
-            WriteCompressedBlob(w, d.TrailingBytes);
-        }
-
-        // Progressive scan script: each scan's band + approximation + restart interval, its participating
-        // components (with their Huffman selectors), and the verbatim inter-scan bytes preceding its entropy.
-        w.Write(d.Progressive);
-        if (d.Progressive)
-        {
-            w.Write(d.Scans.Count);
-            foreach (JpegScan s in d.Scans)
-            {
-                w.Write(s.Ss);
-                w.Write(s.Se);
-                w.Write(s.Ah);
-                w.Write(s.Al);
-                w.Write(s.RestartInterval);
-                w.Write(s.ComponentIndices.Length);
-                for (int i = 0; i < s.ComponentIndices.Length; i++)
-                {
-                    w.Write(s.ComponentIndices[i]);
-                    w.Write(s.CompDcTable[i]);
-                    w.Write(s.CompAcTable[i]);
-                }
-
-                WriteCompressedBlob(w, s.Prefix);
-            }
-        }
-
-        // The coefficients are coded with the DCT-aware AC context model (non-zero-count prediction from
-        // neighbouring blocks + per-frequency-band contexts) and ANS — the same machinery the lossy VarDCT
-        // encoder uses — which beats JPEG's per-block Huffman by exploiting inter-block correlation. It is the
-        // last element, so it is written without a length prefix (Decode reads to end of stream).
-        byte[] coeff = Jxl.JxlEncoder.EncodeJpegCoefficients(d, effort);
-        w.Write(coeff);
-        byte[] container = ms.ToArray();
-
-        // Self-certify: only emit a container that reconstructs the source JPEG byte-for-byte. A source this
-        // path cannot reproduce (an atypical progressive encoder, say) is refused cleanly rather than corrupted.
-        byte[] check = Decode(container);
-        if (!check.AsSpan().SequenceEqual(jpeg))
+        // Self-certify: only return a file that reconstructs the source JPEG byte-for-byte.
+        byte[]? check = JxlCoder.ReconstructJpeg(jxl);
+        if (check == null || !check.AsSpan().SequenceEqual(jpeg))
         {
             throw new NotSupportedException("JPEG could not be losslessly recompressed (byte-exact reconstruction failed).");
         }
 
-        return container;
+        return jxl;
     }
 
-    /// <summary>Reconstructs the exact original JPEG bytes from a SharpImage lossless-JPEG container.</summary>
+    /// <summary>Reconstructs the exact original JPEG bytes from a recompressed JPEG XL file, or from SharpImage's
+    /// earlier "SJXL" container.</summary>
     public static byte[] Decode(byte[] container)
     {
+        if (!CanDecode(container))
+        {
+            return JxlCoder.ReconstructJpeg(container) ?? throw new InvalidDataException("The JPEG XL file has no JPEG reconstruction data.");
+        }
+
         var ms = new MemoryStream(container);
         var r = new BinaryReader(ms);
         if (BinaryPrimitives.ReverseEndianness(r.ReadUInt32()) != Magic)
@@ -185,19 +134,6 @@ public static class JpegXlLossless
         return JpegCoder.RebuildJpeg(d);
     }
 
-    // LEB128 varint — lengths are small (headers ~300 B, prefixes a few KB), so 1-2 bytes instead of 4.
-    private static void WriteVarint(BinaryWriter w, int value)
-    {
-        uint v = (uint)value;
-        while (v >= 0x80)
-        {
-            w.Write((byte)(v | 0x80));
-            v >>= 7;
-        }
-
-        w.Write((byte)v);
-    }
-
     private static int ReadVarint(BinaryReader r)
     {
         int v = 0, shift = 0;
@@ -214,34 +150,7 @@ public static class JpegXlLossless
         }
     }
 
-    private static void WriteBlob(BinaryWriter w, byte[] data)
-    {
-        WriteVarint(w, data.Length);
-        w.Write(data);
-    }
-
     private static byte[] ReadBlob(BinaryReader r) => r.ReadBytes(ReadVarint(r));
-
-    // Brotli-compressed blob: [flag][origLen][compLen][payload] for brotli, or [flag=0][len][data] raw when
-    // compression doesn't help — all lengths varint-coded.
-    private static void WriteCompressedBlob(BinaryWriter w, byte[] data)
-    {
-        var buf = new byte[System.IO.Compression.BrotliEncoder.GetMaxCompressedLength(data.Length)];
-        bool ok = System.IO.Compression.BrotliEncoder.TryCompress(data, buf, out int written, quality: 11, window: 22);
-        if (ok && written < data.Length)
-        {
-            w.Write((byte)1); // brotli
-            WriteVarint(w, data.Length);
-            WriteVarint(w, written);
-            w.Write(buf, 0, written);
-        }
-        else
-        {
-            w.Write((byte)0); // raw
-            WriteVarint(w, data.Length);
-            w.Write(data);
-        }
-    }
 
     private static byte[] ReadCompressedBlob(BinaryReader r)
     {
