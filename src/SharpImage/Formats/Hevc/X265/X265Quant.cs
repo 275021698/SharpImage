@@ -3,6 +3,7 @@
 // significance-context helpers shared with the entropy coder.
 using System;
 using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics;
 
 #if HIGH_BIT_DEPTH
 namespace SharpImage.Formats.Hevc.X265.Hbd;
@@ -539,6 +540,8 @@ internal sealed unsafe class X265Quant
         public int* sigBits0, sigBits1, rateIncUp, rateIncDown, sigRateDelta;
         public long* costCoeff, costUncoded, costSig;
         public EstBitsSbac* est;
+        public System.Runtime.Intrinsics.Vector128<byte> scan4Bytes;   // the 4x4 scan as raster indices
+        public bool signHide;
     }
 
     private uint RdoQuant(X265CuData cu, short* dstCoeff, int ttype, uint absPartIdx, bool usePsy, uint log2TrSize)
@@ -588,6 +591,10 @@ internal sealed unsafe class X265Quant
         cu.GetTUEntropyCodingParameters(ref codeParams, absPartIdx, log2TrSize, bIsLuma);
         k.scan = codeParams.scan;
         k.scan4 = X265Scan.Scan4x4[codeParams.scanType];
+        k.scan4Bytes = System.Runtime.Intrinsics.X86.Sse2.IsSupported
+            ? System.Runtime.Intrinsics.X86.Sse2.PackUnsignedSaturate(System.Runtime.Intrinsics.X86.Sse2.LoadVector128((short*)k.scan4), System.Runtime.Intrinsics.X86.Sse2.LoadVector128((short*)k.scan4 + 8))
+            : default;
+        k.signHide = cu.m_slice.m_pps.bSignHideEnabled;
         uint log2TrSizeCG = log2TrSize - 2;
         uint cgNum = 1u << (int)(log2TrSizeCG * 2);
         uint cgStride = k.trSize >> MLS_CG_LOG2_SIZE;
@@ -650,7 +657,7 @@ internal sealed unsafe class X265Quant
                 ulong ctxCnt = k.trSize == 4 ? 0x8877886654325410UL : TableCnt64[patternSigCtx];
                 uint scanPosBase = (uint)cgScanPos << MLS_CG_SIZE;
                 var totals = new RdoqTotals { uncoded = totalUncodedCost, rd = totalRdCost };
-                c1 = CodedGroup(&k, &totals, &cgRdStats, scanPosBase, coeffFlag[cgScanPos], ctxSet, ctxCnt, ctxSigOffset, signHide);
+                c1 = CodedGroup(&k, &totals, &cgRdStats, scanPosBase, coeffFlag[cgScanPos], ctxSet, ctxCnt, ctxSigOffset);
                 totalUncodedCost = totals.uncoded;
                 totalRdCost = totals.rd;
                 if (cgRdStats.nonZero)
@@ -752,6 +759,11 @@ internal sealed unsafe class X265Quant
         return numSig;
     }
 
+    private struct CtxBytes
+    {
+        public fixed byte v[16];
+    }
+
     private struct RdoqTotals
     {
         public long uncoded, rd;
@@ -759,8 +771,29 @@ internal sealed unsafe class X265Quant
 
     // the coefficients of one coded group (from its last scan position down): levels, the per-position costs, the
     // group's RD statistics; returns c1 (whether a level > 1 was coded: 0)
-    private static uint CodedGroup(RdoqBlock* k, RdoqTotals* totals, CoeffGroupRDStats* cgRdStats, uint scanPosBase, uint subFlagMask, uint ctxSet, ulong ctxCnt, int ctxSigOffset, bool signHide)
+    private static uint CodedGroup(RdoqBlock* k, RdoqTotals* totals, CoeffGroupRDStats* cgRdStats, uint scanPosBase, uint subFlagMask, uint ctxSet, ulong ctxCnt, int ctxSigOffset)
     {
+        // the significance contexts of the 16 positions (ctxCnt's nibble of each position, plus the offset; 0 at DC)
+        CtxBytes cb;
+        byte* ctxs = cb.v;
+        if (System.Runtime.Intrinsics.X86.Ssse3.IsSupported)
+        {
+            var nib = System.Runtime.Intrinsics.X86.Sse2.UnpackLow(
+                System.Runtime.Intrinsics.Vector128.CreateScalarUnsafe(ctxCnt & 0x0F0F0F0F0F0F0F0FUL).AsByte(),
+                System.Runtime.Intrinsics.Vector128.CreateScalarUnsafe((ctxCnt >> 4) & 0x0F0F0F0F0F0F0F0FUL).AsByte());
+            var v = System.Runtime.Intrinsics.X86.Sse2.Add(System.Runtime.Intrinsics.X86.Ssse3.Shuffle(nib, k->scan4Bytes), System.Runtime.Intrinsics.Vector128.Create((byte)ctxSigOffset));
+            System.Runtime.Intrinsics.X86.Sse2.Store(ctxs, v);
+        }
+        else
+        {
+            for (int p = 0; p < 16; p++) ctxs[p] = (byte)(((ctxCnt >> (4 * k->scan4[p])) & 0xF) + (ulong)ctxSigOffset);
+        }
+
+        if (k->scan[scanPosBase] == 0)
+        {
+            ctxs[0] = 0;
+        }
+
         const uint cgSize = 1 << MLS_CG_SIZE;
         long totalUncoded = totals->uncoded, totalRd = totals->rd;
         uint c1 = 1;
@@ -809,7 +842,7 @@ internal sealed unsafe class X265Quant
             totalUncoded += uncoded;
 
             int* greaterOneBits = k->est->greaterOneBits + ((4 * ctxSet + c1) * 2);
-            uint ctxSig = blkPos == 0 ? 0 : (uint)(((ctxCnt >> (4 * k->scan4[scanPosinCG])) & 0xF) + (ulong)ctxSigOffset);
+            uint ctxSig = ctxs[scanPosinCG];
 
             if ((subFlagMask & 1) == 0)
             {
@@ -909,7 +942,7 @@ internal sealed unsafe class X265Quant
                 totalRd += best;
 
                 // costs for the sign hiding performed at the end
-                if (signHide && level != 0)
+                if (k->signHide && level != 0)
                 {
                     SignHideRates(k, blkPos, level, baseLevel, goRiceParam, greaterOneBits, levelAbsBits, c1c2Rate);
                 }
