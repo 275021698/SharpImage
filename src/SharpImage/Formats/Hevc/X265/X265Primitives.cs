@@ -48,7 +48,7 @@ internal static unsafe partial class X265Primitives
         return sum;
     }
 
-    public static sse_t SsePP(pixel* pix1, long stride1, pixel* pix2, long stride2, int lx, int ly)
+    internal static sse_t SsePPScalar(pixel* pix1, long stride1, pixel* pix2, long stride2, int lx, int ly)
     {
         sse_t sum = 0;
         for (int y = 0; y < ly; y++)
@@ -87,7 +87,7 @@ internal static unsafe partial class X265Primitives
         return (a + s) ^ s;
     }
 
-    public static int Satd4x4(pixel* pix1, long stride1, pixel* pix2, long stride2)
+    internal static int Satd4x4Scalar(pixel* pix1, long stride1, pixel* pix2, long stride2)
     {
         sum2_t* tmp = stackalloc sum2_t[8];
         sum2_t sum = 0;
@@ -113,7 +113,7 @@ internal static unsafe partial class X265Primitives
         return (int)(sum >> 1);
     }
 
-    private static int Sa8d8x8Raw(pixel* pix1, long i1, pixel* pix2, long i2)
+    internal static int Sa8d8x8RawScalar(pixel* pix1, long i1, pixel* pix2, long i2)
     {
         sum2_t* tmp = stackalloc sum2_t[32];
         sum2_t sum = 0;
@@ -816,7 +816,7 @@ internal static unsafe partial class X265Primitives
         return numSig;
     }
 
-    public static uint NQuant(short* coef, int* quantCoeff, short* qCoef, int qBits, int add, int numCoeff)
+    internal static uint NQuantScalar(short* coef, int* quantCoeff, short* qCoef, int qBits, int add, int numCoeff)
     {
         uint numSig = 0;
         for (int blockpos = 0; blockpos < numCoeff; blockpos++)
@@ -1166,6 +1166,10 @@ internal static unsafe partial class X265Primitives
     private static readonly short[] InvAngleTable = { 4096, 1638, 910, 630, 482, 390, 315, 256 };
 
     public static void IntraPredAng(int width, pixel* dst, long dstStride, pixel* srcPix0, int dirMode, int bFilter)
+        => IntraPredAng(width, dst, dstStride, srcPix0, dirMode, bFilter, transposeHorizontal: true);
+
+    // transposeHorizontal false: a horizontal mode's prediction is left transposed (what all_angs_pred stores)
+    private static void IntraPredAng(int width, pixel* dst, long dstStride, pixel* srcPix0, int dirMode, int bFilter, bool transposeHorizontal)
     {
         int width2 = width << 1;
         bool horMode = dirMode < 18;
@@ -1240,10 +1244,7 @@ internal static unsafe partial class X265Primitives
                 int fraction = angleSum & 31;
                 if (fraction != 0)
                 {
-                    for (int x = 0; x < width; x++)
-                    {
-                        dst[(y * dstStride) + x] = (pixel)((((32 - fraction) * refp[offset + x]) + (fraction * refp[offset + x + 1]) + 16) >> 5);
-                    }
+                    AngularRow(dst + (y * dstStride), refp + offset, fraction, width);
                 }
                 else
                 {
@@ -1255,7 +1256,7 @@ internal static unsafe partial class X265Primitives
             }
         }
 
-        if (horMode)
+        if (horMode && transposeHorizontal)
         {
             for (int y = 0; y < width - 1; y++)
             {
@@ -1295,19 +1296,8 @@ internal static unsafe partial class X265Primitives
         {
             pixel* srcPix = (X265Tables.IntraFilterFlags[mode] & size) != 0 ? filtPix : refPix;
             pixel* outp = dest + ((mode - 2) << (log2Size * 2));
-            IntraPredAng(size, outp, size, srcPix, mode, bLuma);
-            if (mode < 18)
-            {
-                for (int k = 0; k < size - 1; k++)
-                {
-                    for (int l = k + 1; l < size; l++)
-                    {
-                        pixel tmp = outp[(k * size) + l];
-                        outp[(k * size) + l] = outp[(l * size) + k];
-                        outp[(l * size) + k] = tmp;
-                    }
-                }
-            }
+            // (all_angs_pred transposes the horizontal modes back: they stay as computed)
+            IntraPredAng(size, outp, size, srcPix, mode, bLuma, transposeHorizontal: false);
         }
     }
 }

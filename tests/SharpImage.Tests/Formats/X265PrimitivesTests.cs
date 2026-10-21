@@ -27,6 +27,125 @@ public sealed class X265PrimitivesTests
         await Assert.That(IdctMismatches(depth)).IsEqualTo(0);
     }
 
+    [Test]
+    [Arguments(8)]
+    [Arguments(10)]
+    public async Task PixelCosts_SimdMatchScalar(int depth)
+    {
+        if (!System.Runtime.Intrinsics.X86.Sse2.IsSupported) return;
+        await Assert.That(depth == 8 ? PixelCostMismatches8() : PixelCostMismatches10()).IsEqualTo(0);
+    }
+
+    [Test]
+    [Arguments(8)]
+    [Arguments(10)]
+    public async Task NQuant_SimdMatchesScalar(int depth)
+    {
+        await Assert.That(NQuantMismatches(depth)).IsEqualTo(0);
+    }
+
+    // random, smooth and extreme (checkerboard 0 / max, the 8-bit SA8D lane overflow) blocks
+    private static void Fill<T>(Span<T> p, Random rnd, int kind, int max) where T : System.Numerics.INumber<T>
+    {
+        for (int i = 0; i < p.Length; i++)
+        {
+            int v = kind switch
+            {
+                0 => rnd.Next(max + 1),
+                1 => (i % 48) * max / 48,
+                2 => ((i + (i / 48)) & 1) != 0 ? max : 0,
+                _ => rnd.Next(2) == 0 ? max : 0,
+            };
+            p[i] = T.CreateTruncating(v);
+        }
+    }
+
+    private static unsafe int PixelCostMismatches8()
+    {
+        var rnd = new Random(8);
+        int bad = 0;
+        byte* a = stackalloc byte[48 * 48];
+        byte* b = stackalloc byte[48 * 48];
+        for (int iter = 0; iter < 2000; iter++)
+        {
+            Fill(new Span<byte>(a, 48 * 48), rnd, iter % 4, 255);
+            Fill(new Span<byte>(b, 48 * 48), rnd, (iter / 4) % 4 == 0 ? 0 : (iter + 1) % 4, 255);
+            if ((iter & 7) == 7) new Span<byte>(b, 48 * 48).Clear();   // a block against zero (psy cost)
+            int o = rnd.Next(8);
+            if (X265.X265Primitives.Sa8d8x8Raw(a + o, 48, b, 48) != X265.X265Primitives.Sa8d8x8RawScalar(a + o, 48, b, 48)) bad++;
+            if (X265.X265Primitives.Satd4x4(a + o, 48, b, 48) != X265.X265Primitives.Satd4x4Scalar(a + o, 48, b, 48)) bad++;
+            int n = 4 << (iter & 3);
+            if (X265.X265Primitives.SsePP(a + o, 48, b, 48, n, n) != X265.X265Primitives.SsePPScalar(a + o, 48, b, 48, n, n)) bad++;
+        }
+
+        return bad;
+    }
+
+    private static unsafe int PixelCostMismatches10()
+    {
+        var rnd = new Random(10);
+        int bad = 0;
+        ushort* a = stackalloc ushort[48 * 48];
+        ushort* b = stackalloc ushort[48 * 48];
+        for (int iter = 0; iter < 2000; iter++)
+        {
+            Fill(new Span<ushort>(a, 48 * 48), rnd, iter % 4, 1023);
+            Fill(new Span<ushort>(b, 48 * 48), rnd, (iter / 4) % 4 == 0 ? 0 : (iter + 1) % 4, 1023);
+            if ((iter & 7) == 7) new Span<ushort>(b, 48 * 48).Clear();
+            int o = rnd.Next(8);
+            if (X265Hbd.X265Primitives.Sa8d8x8Raw(a + o, 48, b, 48) != X265Hbd.X265Primitives.Sa8d8x8RawScalar(a + o, 48, b, 48)) bad++;
+            if (X265Hbd.X265Primitives.Satd4x4(a + o, 48, b, 48) != X265Hbd.X265Primitives.Satd4x4Scalar(a + o, 48, b, 48)) bad++;
+            int n = 4 << (iter & 3);
+            if (X265Hbd.X265Primitives.SsePP(a + o, 48, b, 48, n, n) != X265Hbd.X265Primitives.SsePPScalar(a + o, 48, b, 48, n, n)) bad++;
+        }
+
+        return bad;
+    }
+
+    private static unsafe int NQuantMismatches(int depth)
+    {
+        var rnd = new Random(depth + 7);
+        int bad = 0;
+        short* coef = stackalloc short[1024];
+        int* q = stackalloc int[1024];
+        short* oa = stackalloc short[1024];
+        short* ob = stackalloc short[1024];
+        for (int iter = 0; iter < 300; iter++)
+        {
+            int n = 16 << (2 * (iter & 3));   // 4x4 .. 32x32
+            int qBits = 14 + rnd.Next(14);
+            int scale = new[] { 26214, 23302, 20560, 18396, 16384, 14564 }[rnd.Next(6)] << rnd.Next(3);
+            for (int i = 0; i < n; i++)
+            {
+                coef[i] = (iter % 3) switch
+                {
+                    0 => (short)rnd.Next(short.MinValue, short.MaxValue + 1),
+                    1 => (short)rnd.Next(-300, 301),
+                    _ => (short)(rnd.Next(2) == 0 ? short.MinValue : short.MaxValue),   // levels past int16
+                };
+                q[i] = scale;
+            }
+
+            int add = (1 << (qBits - 1)) - rnd.Next(1 << 10);
+            uint sa, sb;
+            if (depth == 8)
+            {
+                sa = X265.X265Primitives.NQuant(coef, q, oa, qBits, add, n);
+                sb = X265.X265Primitives.NQuantScalar(coef, q, ob, qBits, add, n);
+            }
+            else
+            {
+                sa = X265Hbd.X265Primitives.NQuant(coef, q, oa, qBits, add, n);
+                sb = X265Hbd.X265Primitives.NQuantScalar(coef, q, ob, qBits, add, n);
+            }
+
+            if (sa != sb) bad++;
+            for (int i = 0; i < n; i++) if (oa[i] != ob[i]) bad++;
+        }
+
+        return bad;
+    }
+
     private static unsafe int DctMismatches(int depth)
     {
         var rnd = new Random(depth);
