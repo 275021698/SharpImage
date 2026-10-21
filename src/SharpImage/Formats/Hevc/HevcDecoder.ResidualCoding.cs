@@ -27,6 +27,9 @@ internal sealed partial class HevcDecoder
         { 6, 10, 13, 15 },
     };
 
+    // the one coefficient group of a 4x4 transform block
+    private static readonly byte[] SingleCg = { 0 };
+
     // 2x2 diagonal scan (for sub-block grids of 8x8 TU)
     private static readonly byte[] DiagScan2x2X = { 0, 0, 1, 1 };
     private static readonly byte[] DiagScan2x2Y = { 0, 1, 0, 1 };
@@ -87,6 +90,7 @@ internal sealed partial class HevcDecoder
     /// Decodes residual coefficients for a transform block.
     /// Closely matches FFmpeg's ff_hevc_hls_residual_coding.
     /// </summary>
+    [SkipLocalsInit]   // every buffer below is cleared or written before it is read
     private bool DecodeResidualCoding(ref HevcCabacDecoder cabac, HevcSequenceParameterSet sps,
         HevcPictureParameterSet pps, int x0, int y0, int log2TrafoSize, int scanIdx,
         int cIdx, Span<short> residual,
@@ -156,8 +160,8 @@ internal sealed partial class HevcDecoder
 
                 if (trafoSize == 4)
                 {
-                    scanXCg = new byte[] { 0 };
-                    scanYCg = new byte[] { 0 };
+                    scanXCg = SingleCg;
+                    scanYCg = SingleCg;
                 }
                 else if (trafoSize == 8)
                 {
@@ -228,6 +232,8 @@ internal sealed partial class HevcDecoder
         int greater1Ctx = 1;
 
         bool persistentRice = sps.PersistentRiceAdaptationEnabled;
+        Span<byte> sigCoeffFlagIdx = stackalloc byte[16];
+        Span<byte> coeffAbsLevelGreater1Flag = stackalloc byte[8];
 
         for (int i = numLastSubset; i >= 0; i--)
         {
@@ -268,7 +274,6 @@ internal sealed partial class HevcDecoder
 
             int lastScanPos = numCoeffInScanOrder - offset - 1;
             int nEnd;
-            Span<byte> sigCoeffFlagIdx = stackalloc byte[16];
             int nbSigCoeff = 0;
 
             if (i == numLastSubset)
@@ -385,7 +390,6 @@ internal sealed partial class HevcDecoder
 
             // Greater1 flags
             int firstGreater1CoeffIdx = -1;
-            Span<byte> coeffAbsLevelGreater1Flag = stackalloc byte[8];
             coeffAbsLevelGreater1Flag.Clear();
 
             int ctxSet = (i > 0 && cIdx == 0) ? 2 : 0;

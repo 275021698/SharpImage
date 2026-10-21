@@ -28,6 +28,20 @@ public static partial class HeifCoder
     private static void ConvertHevcPicture(Hevc.DecodedVideoFrame yuv, Hevc.HevcChromaFormat chroma, int bpp,
         (int Cp, int Tc, int Mc, bool Full) nclx, ImageFrame frame)
     {
+        // rows independent: blocks of 64 in parallel
+        int rows = (int)frame.Rows;
+        if (rows <= 128)
+        {
+            ConvertHevcRows(yuv, chroma, bpp, nclx, frame, 0, rows);
+            return;
+        }
+
+        System.Threading.Tasks.Parallel.For(0, (rows + 63) / 64, b => ConvertHevcRows(yuv, chroma, bpp, nclx, frame, b * 64, Math.Min(rows, (b + 1) * 64)));
+    }
+
+    private static void ConvertHevcRows(Hevc.DecodedVideoFrame yuv, Hevc.HevcChromaFormat chroma, int bpp,
+        (int Cp, int Tc, int Mc, bool Full) nclx, ImageFrame frame, int y0, int y1)
+    {
         int w = (int)frame.Columns, h = (int)frame.Rows, nch = frame.NumberOfChannels;
         bool hbd = bpp > 8;
         bool mono = chroma == Hevc.HevcChromaFormat.Monochrome;
@@ -50,7 +64,7 @@ public static partial class HeifCoder
         // Op_mono_to_RGB24_32: the luma as R = G = B, whatever the range and matrix
         if (mono && !hbd)
         {
-            for (int y = 0; y < h; y++)
+            for (int y = y0; y < y1; y++)
             {
                 var row = frame.GetPixelRowForWrite(y);
                 for (int x = 0; x < w; x++)
@@ -71,7 +85,7 @@ public static partial class HeifCoder
         {
             int r = (int)MathF.Round(256 * rCr, MidpointRounding.AwayFromZero), gr = (int)MathF.Round(256 * gCr, MidpointRounding.AwayFromZero);
             int gb = (int)MathF.Round(256 * gCb, MidpointRounding.AwayFromZero), b = (int)MathF.Round(256 * bCb, MidpointRounding.AwayFromZero);
-            for (int y = 0; y < h; y++)
+            for (int y = y0; y < y1; y++)
             {
                 var row = frame.GetPixelRowForWrite(y);
                 for (int x = 0; x < w; x++)
@@ -88,7 +102,7 @@ public static partial class HeifCoder
         }
 
         float limitedOffset = 16 << (bpp - 8);
-        for (int y = 0; y < h; y++)
+        for (int y = y0; y < y1; y++)
         {
             var row = frame.GetPixelRowForWrite(y);
             int cy = y >> shiftV;

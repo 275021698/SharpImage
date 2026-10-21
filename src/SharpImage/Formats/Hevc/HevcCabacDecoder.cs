@@ -18,10 +18,15 @@ namespace SharpImage.Formats.Hevc
     public ref struct HevcCabacDecoder
     {
         private readonly ReadOnlySpan<byte> data;
-        private int bytePosition;
-        private int bitsRemaining;
+
+        // The arithmetic decoder of 9.3.4.3 with the bitstream in a window: 'value' holds ivlOffset (9 bits) followed
+        // by 'k' look-ahead bits, so ivlOffset = value >> k and comparisons scale ivlCurrRange by 2^k; renormalizing
+        // just lowers k. 'pos' is the next byte to load (counting zero bytes past the end, which is what the spec
+        // engine reads there); the spec's bit position is pos * 8 - k.
+        private ulong value;
+        private int k;
+        private int pos;
         private uint ivlCurrRange;  // HEVC naming (was codIRange in H.264)
-        private uint ivlOffset;     // HEVC naming (was codIOffset in H.264)
 
         /// <summary>
         /// Context states: probability state (0-63) and MPS value (0 or 1).
@@ -32,7 +37,7 @@ namespace SharpImage.Formats.Hevc
         /// <summary>
         /// Gets whether the decoder has reached the end of data.
         /// </summary>
-        public readonly bool IsEndOfStream => bytePosition >= data.Length && bitsRemaining == 0;
+        public readonly bool IsEndOfStream => false;   // (the spec engine reads zeros past the end; slices end by their flag)
 
         /// <summary>
         /// Creates a new HEVC CABAC decoder.
@@ -51,21 +56,13 @@ namespace SharpImage.Formats.Hevc
 
             data = bitstreamData;
             contextStates = contextStateStorage;
-
-            bytePosition = 0;
-            bitsRemaining = 8;
-
-            // Initialize arithmetic decoder state (9.3.2.2)
+            value = 0;
+            k = 0;
+            pos = 0;
             ivlCurrRange = 510;
-            ivlOffset = 0;
 
-            // Read initial 9 bits into ivlOffset
-            if (data.Length >= 2)
-            {
-                ivlOffset = (uint)((data[0] << 1) | (data[1] >> 7));
-                bytePosition = 1;
-                bitsRemaining = 7;
-            }
+            // Initialize arithmetic decoder state (9.3.2.2): the first 9 bits into ivlOffset
+            InitEngine(0);
 
             // Initialize all context states
             InitializeContexts(sliceQp, initType);
@@ -79,19 +76,11 @@ namespace SharpImage.Formats.Hevc
         {
             data = bitstreamData;
             contextStates = sharedContextStates;
-
-            bytePosition = 0;
-            bitsRemaining = 8;
-
+            value = 0;
+            k = 0;
+            pos = 0;
             ivlCurrRange = 510;
-            ivlOffset = 0;
-
-            if (data.Length >= 2)
-            {
-                ivlOffset = (uint)((data[0] << 1) | (data[1] >> 7));
-                bytePosition = 1;
-                bitsRemaining = 7;
-            }
+            InitEngine(0);
             // Context states are already initialized from parent slice
         }
 
@@ -121,46 +110,32 @@ namespace SharpImage.Formats.Hevc
             byte state = contextStates[contextIndex];
             int stateIdx = state >> 1;
             int valMps = state & 1;
+            if (DiagBinLog != null) DiagLog('C', contextIndex, state);
 
-            uint preRange = ivlCurrRange;
-            uint preOffset = ivlOffset;
-
-            // Get LPS range from table (same as H.264)
-            int rangeIndex = (int)(ivlCurrRange >> 6) & 3;
-            uint ivlLpsRange = HevcCabacTables.GetLpsRange(stateIdx, rangeIndex);
-
-            ivlCurrRange -= ivlLpsRange;
-
+            uint lps = HevcCabacTables.RangeLps[(stateIdx << 2) + (int)((ivlCurrRange >> 6) & 3)];
+            ivlCurrRange -= lps;
+            ulong scaled = (ulong)ivlCurrRange << k;
             int binVal;
-
-            if (ivlOffset >= ivlCurrRange)
+            if (value < scaled)
             {
-                // LPS decoded
-                binVal = 1 - valMps;
-                ivlOffset -= ivlCurrRange;
-                ivlCurrRange = ivlLpsRange;
-
-                if (stateIdx == 0)
-                    valMps = 1 - valMps;
-
-                stateIdx = HevcCabacTables.TransitionIndexLps[stateIdx];
-            }
-            else
-            {
-                // MPS decoded
+                // MPS
                 binVal = valMps;
                 stateIdx = HevcCabacTables.TransitionIndexMps[stateIdx];
             }
+            else
+            {
+                // LPS
+                binVal = 1 - valMps;
+                value -= scaled;
+                ivlCurrRange = lps;
+                if (stateIdx == 0)
+                    valMps = 1 - valMps;
+                stateIdx = HevcCabacTables.TransitionIndexLps[stateIdx];
+            }
 
             contextStates[contextIndex] = (byte)((stateIdx << 1) | valMps);
-
             Renormalize();
-
-            if (DiagBinLog != null)
-                DiagBinLog.Add((DiagBinCount, 'C', contextIndex, binVal, preRange, preOffset, state));
-
             DiagBinCount++;
-
             return binVal;
         }
 
@@ -170,23 +145,17 @@ namespace SharpImage.Formats.Hevc
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public int DecodeBypass()
         {
-            uint preRange = ivlCurrRange;
-            uint preOffset = ivlOffset;
-
-            ivlOffset = (ivlOffset << 1) | ReadBit();
-
-            int result;
-            if (ivlOffset >= ivlCurrRange)
+            if (DiagBinLog != null) DiagLog('B', -1, 0);
+            k--;
+            ulong scaled = (ulong)ivlCurrRange << k;
+            int result = 0;
+            if (value >= scaled)
             {
-                ivlOffset -= ivlCurrRange;
+                value -= scaled;
                 result = 1;
             }
-            else
-                result = 0;
 
-            if (DiagBinLog != null)
-                DiagBinLog.Add((DiagBinCount, 'B', -1, result, preRange, preOffset, 0));
-
+            if (k < 8) Refill();
             DiagBinCount++;
             return result;
         }
@@ -197,23 +166,15 @@ namespace SharpImage.Formats.Hevc
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public int DecodeTerminate()
         {
-            uint preRange = ivlCurrRange;
-            uint preOffset = ivlOffset;
-
+            if (DiagBinLog != null) DiagLog('T', -1, 0);
             ivlCurrRange -= 2;
-
-            if (ivlOffset >= ivlCurrRange)
+            if (value >= (ulong)ivlCurrRange << k)
             {
-                if (DiagBinLog != null)
-                    DiagBinLog.Add((DiagBinCount, 'T', -1, 1, preRange, preOffset, 0));
                 DiagBinCount++;
                 return 1;
             }
 
             Renormalize();
-
-            if (DiagBinLog != null)
-                DiagBinLog.Add((DiagBinCount, 'T', -1, 0, preRange, preOffset, 0));
             DiagBinCount++;
             return 0;
         }
@@ -345,49 +306,62 @@ namespace SharpImage.Formats.Hevc
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private void Renormalize()
         {
-            while (ivlCurrRange < 256)
-            {
-                ivlCurrRange <<= 1;
-                ivlOffset = (ivlOffset << 1) | ReadBit();
-            }
+            // ivlCurrRange >= 6 (the smallest LPS range): at most 6 doublings, all the window's look-ahead takes
+            int n = System.Numerics.BitOperations.LeadingZeroCount(ivlCurrRange) - 23;
+            ivlCurrRange <<= n;
+            k -= n;
+            if (k < 8) Refill();
         }
 
-        /// <summary>
-        /// Reads the next bit from the bitstream.
-        /// </summary>
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private uint ReadBit()
+        // look-ahead bytes into the window (zeros past the end)
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private void Refill()
         {
-            if (bytePosition >= data.Length)
-                return 0;
-
-            bitsRemaining--;
-            uint bit = (uint)((data[bytePosition] >> bitsRemaining) & 1);
-
-            if (bitsRemaining == 0)
+            while (k <= 40)   // value holds 9 + k <= 57 bits
             {
-                bitsRemaining = 8;
-                bytePosition++;
+                value = (value << 8) | (pos < data.Length ? data[pos] : 0u);
+                pos++;
+                k += 8;
             }
-
-            return bit;
         }
+
+        // (Re)starts the engine at a byte offset: ivlOffset from the next 9 bits, ivlCurrRange 510. With fewer than two
+        // bytes left the engine reads no offset bits there (ivlOffset 0), as it always has.
+        private void InitEngine(int byteOffset)
+        {
+            ivlCurrRange = 510;
+            value = 0;
+            pos = byteOffset;
+            k = byteOffset < data.Length - 1 ? -9 : 0;
+            Refill();
+        }
+
+        // the spec engine's bit position (it stops at the end of the data)
+        private readonly int SpecBitPosition => Math.Min((pos * 8) - k, data.Length * 8);
+
+        private readonly int SpecBytePosition => SpecBitPosition >> 3;
+
+        private readonly int SpecBitsRemaining => 8 - (SpecBitPosition & 7);
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private readonly void DiagLog(char mode, int ctx, byte state) =>
+            DiagBinLog!.Add((DiagBinCount, mode, ctx, -1, ivlCurrRange, (uint)(value >> k), state));
 
         /// <summary>
         /// Gets the current bit position for debugging.
         /// </summary>
-        public readonly int CurrentBitPosition => bytePosition * 8 + (8 - bitsRemaining);
+        public readonly int CurrentBitPosition => SpecBitPosition;
 
         /// <summary>
         /// Gets the remaining bytes in the stream.
         /// </summary>
-        public readonly int RemainingBytes => data.Length - bytePosition;
+        public readonly int RemainingBytes => data.Length - SpecBytePosition;
 
         // DIAG: expose internal state for debugging
-        public readonly uint DiagIvlOffset => ivlOffset;
+        public readonly uint DiagIvlOffset => (uint)(value >> k);
         public readonly uint DiagIvlRange => ivlCurrRange;
-        public readonly int DiagBytePos => bytePosition;
-        public readonly int DiagBitsRemaining => bitsRemaining;
+        public readonly int DiagBytePos => SpecBytePosition;
+        public readonly int DiagBitsRemaining => SpecBitsRemaining;
         public int DiagBinCount;
         public bool DiagTraceBins;
         public List<(int BinIdx, char Mode, int CtxIdx, int BinVal, uint PreRange, uint PreOffset, byte CtxState)>? DiagBinLog;
@@ -430,46 +404,20 @@ namespace SharpImage.Formats.Hevc
             // Determine the actual byte position accounting for buffered bits
             // FFmpeg's skip_bytes: ptr = bytestream; if (low & 0x1) ptr--;
             // Our equivalent: find the byte boundary of where we actually are
-            int actualBytePos = bytePosition;
-            if (bitsRemaining < 8)
+            int actualBytePos = SpecBytePosition;
+            if (SpecBitsRemaining < 8)
                 actualBytePos++; // we've partially consumed a byte, move past it
 
-            // Re-initialize CABAC engine at this byte position
-            bytePosition = actualBytePos;
-            bitsRemaining = 8;
-            ivlCurrRange = 510;
-            ivlOffset = 0;
-
-            if (bytePosition < data.Length - 1)
-            {
-                ivlOffset = (uint)((data[bytePosition] << 1) | (data[bytePosition + 1] >> 7));
-                bytePosition++;
-                bitsRemaining = 7;
-                return true;
-            }
-
-            // Past end of data — matches FFmpeg's skip_bytes returning NULL
-            return false;
+            // Re-initialize CABAC engine at this byte position; past the end of the data FFmpeg's skip_bytes returns NULL
+            InitEngine(actualBytePos);
+            return actualBytePos < data.Length - 1;
         }
 
         /// <summary>
         /// Re-initializes the CABAC decoder on a sub-segment of the original data.
         /// Used for WPP where each row has its own entry point in the bitstream.
         /// </summary>
-        public void ReinitAtOffset(int byteOffset)
-        {
-            bytePosition = byteOffset;
-            bitsRemaining = 8;
-            ivlCurrRange = 510;
-            ivlOffset = 0;
-
-            if (bytePosition < data.Length - 1)
-            {
-                ivlOffset = (uint)((data[bytePosition] << 1) | (data[bytePosition + 1] >> 7));
-                bytePosition++;
-                bitsRemaining = 7;
-            }
-        }
+        public void ReinitAtOffset(int byteOffset) => InitEngine(byteOffset);
 
         /// <summary>
         /// Reads raw bytes from the underlying data at an absolute offset (diagnostic only).
@@ -491,8 +439,8 @@ namespace SharpImage.Formats.Hevc
             // FFmpeg's skip_bytes: ptr = bytestream; if (low & 0x1) ptr--;
             // The "bytestream" pointer in FFmpeg points to the next byte to be read.
             // If low bit of 'low' is set, one byte was over-read — back up one.
-            int rawStart = bytePosition;
-            if (bitsRemaining < 8)
+            int rawStart = SpecBytePosition;
+            if (SpecBitsRemaining < 8)
                 rawStart++; // partially consumed byte — move past it
 
             // Extract the raw byte span
@@ -503,19 +451,7 @@ namespace SharpImage.Formats.Hevc
             var pcmData = data.Slice(rawStart, numBytes);
 
             // Reinitialize CABAC engine after the skipped bytes
-            int newPos = rawStart + numBytes;
-            bytePosition = newPos;
-            bitsRemaining = 8;
-            ivlCurrRange = 510;
-            ivlOffset = 0;
-
-            if (bytePosition < data.Length - 1)
-            {
-                ivlOffset = (uint)((data[bytePosition] << 1) | (data[bytePosition + 1] >> 7));
-                bytePosition++;
-                bitsRemaining = 7;
-            }
-
+            InitEngine(rawStart + numBytes);
             return pcmData;
         }
 
