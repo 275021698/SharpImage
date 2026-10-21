@@ -1111,24 +1111,47 @@ public static partial class HeifCoder
         // a source deeper than 8 bits is coded at 10 (heif-enc's default for 16-bit PNGs), else at 8
         bool deep = !SourcePlanes.TryGetValue(image, out _) && AutoBitDepth(image) != 8;
         int outCh = (gray ? 1 : 3) + (image.HasAlpha ? 1 : 0);
-        var px = new ushort[w * h * outCh];
-        for (int y = 0; y < h; y++)
+        bool hasAlpha = image.HasAlpha;
+        // the samples (Y or RGB, then alpha) interleaved, 16-bit for a deep source, else scaled to bytes; rows in parallel
+        ushort[]? px = deep ? new ushort[w * h * outCh] : null;
+        byte[]? px8 = deep ? null : new byte[w * h * outCh];
+        System.Threading.Tasks.Parallel.For(0, (h + 31) / 32, blk =>
         {
-            ReadOnlySpan<ushort> row = image.GetPixelRow(y);
-            for (int x = 0; x < w; x++)
+            for (int y = blk * 32; y < Math.Min(h, (blk + 1) * 32); y++)
             {
-                int o = x * ch;
-                int d = ((y * w) + x) * outCh;
-                px[d] = row[o];
-                if (!gray)
+                ReadOnlySpan<ushort> row = image.GetPixelRow(y);
+                for (int x = 0; x < w; x++)
                 {
-                    px[d + 1] = colors > 1 ? row[o + 1] : row[o];
-                    px[d + 2] = colors > 2 ? row[o + 2] : row[o];
-                }
+                    int o = x * ch;
+                    int d = ((y * w) + x) * outCh;
+                    ushort s0 = row[o];
+                    ushort s1 = colors > 1 ? row[o + 1] : s0;
+                    ushort s2 = colors > 2 ? row[o + 2] : s0;
+                    if (px != null)
+                    {
+                        px[d] = s0;
+                        if (!gray)
+                        {
+                            px[d + 1] = s1;
+                            px[d + 2] = s2;
+                        }
 
-                if (image.HasAlpha) px[d + outCh - 1] = row[o + ch - 1];
+                        if (hasAlpha) px[d + outCh - 1] = row[o + ch - 1];
+                    }
+                    else
+                    {
+                        px8![d] = Quantum.ScaleToByte(s0);
+                        if (!gray)
+                        {
+                            px8[d + 1] = Quantum.ScaleToByte(s1);
+                            px8[d + 2] = Quantum.ScaleToByte(s2);
+                        }
+
+                        if (hasAlpha) px8[d + outCh - 1] = Quantum.ScaleToByte(row[o + ch - 1]);
+                    }
+                }
             }
-        }
+        });
 
         // The samples' colour: colr prof from the image's ICC profile, else colr nclx from its CICP code points
         // (heif-enc's default nclx: sRGB primaries and transfer, BT.601 matrix, full range)
@@ -1139,10 +1162,8 @@ public static partial class HeifCoder
         byte[]? xmp = image.Metadata.Xmp is { } xmpText ? System.Text.Encoding.UTF8.GetBytes(xmpText) : null;
         int orientation = (int)image.Orientation is >= 1 and <= 8 ? (int)image.Orientation : 1;
         int q = Math.Clamp(options.Quality, 0, 100);
-        if (deep) return Hevc.HeicEncoder.Encode10(px, w, h, outCh, q, options.Qp, cp, tc, icc, exif, xmp, orientation);
-        var px8 = new byte[px.Length];
-        for (int i = 0; i < px.Length; i++) px8[i] = Quantum.ScaleToByte(px[i]);
-        return Hevc.HeicEncoder.Encode(px8, w, h, outCh, q, options.Qp, cp, tc, icc, exif, xmp, orientation);
+        if (deep) return Hevc.HeicEncoder.Encode10(px!, w, h, outCh, q, options.Qp, cp, tc, icc, exif, xmp, orientation);
+        return Hevc.HeicEncoder.Encode(px8!, w, h, outCh, q, options.Qp, cp, tc, icc, exif, xmp, orientation);
     }
 
     // AVIF encode via the from-scratch AV1 intra encoder. Current scope: grayscale, up to one 64x64 superblock.
@@ -2167,17 +2188,44 @@ public static partial class HeifCoder
     // True when any sample carries more than 8 bits of precision (an 8-bit-origin sample is exactly v8 * 257).
     private static bool HasSubByteDetail(ImageFrame image)
     {
+        // v % 257 == 0 exactly when both bytes of v are equal; rows in parallel blocks, stopping at the first found
         int w = (int)image.Columns, h = (int)image.Rows, n = w * image.NumberOfChannels;
-        for (int y = 0; y < h; y++)
+        int found = 0;
+        System.Threading.Tasks.Parallel.For(0, (h + 63) / 64, (blk, state) =>
         {
-            ReadOnlySpan<ushort> row = image.GetPixelRow(y);
-            for (int i = 0; i < n; i++)
+            for (int y = blk * 64; y < Math.Min(h, (blk + 1) * 64) && System.Threading.Volatile.Read(ref found) == 0; y++)
             {
-                if (row[i] % 257 != 0) return true;
-            }
-        }
+                ReadOnlySpan<ushort> row = image.GetPixelRow(y);
+                int i = 0;
+                if (System.Runtime.Intrinsics.Vector128.IsHardwareAccelerated)
+                {
+                    var diff = System.Runtime.Intrinsics.Vector128<ushort>.Zero;
+                    for (; i + 8 <= n; i += 8)
+                    {
+                        var v = System.Runtime.Intrinsics.Vector128.Create(row.Slice(i, 8));
+                        diff |= v ^ (System.Runtime.Intrinsics.Vector128.ShiftLeft(v, 8) | System.Runtime.Intrinsics.Vector128.ShiftRightLogical(v, 8));
+                    }
 
-        return false;
+                    if (diff != System.Runtime.Intrinsics.Vector128<ushort>.Zero)
+                    {
+                        System.Threading.Volatile.Write(ref found, 1);
+                        state.Stop();
+                        return;
+                    }
+                }
+
+                for (; i < n; i++)
+                {
+                    if (row[i] % 257 != 0)
+                    {
+                        System.Threading.Volatile.Write(ref found, 1);
+                        state.Stop();
+                        return;
+                    }
+                }
+            }
+        });
+        return found != 0;
     }
 
     // General AVIF encode (any bit depth, any chroma layout): samples are taken straight from the 16-bit quantum at

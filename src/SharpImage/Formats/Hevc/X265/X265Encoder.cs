@@ -526,16 +526,18 @@ internal static unsafe class X265Encoder
         int blocksY = (maxRow + loopIncr - 1) / loopIncr;
         var qpAqOffset = new double[blocksX * blocksY];
         double strength = p.aqStrength * 1.0397f;
-        int blockXY = 0;
-        for (int blockY = 0; blockY < maxRow; blockY += loopIncr)
+        // each block independent: rows of blocks in parallel
+        System.Threading.Tasks.Parallel.For(0, blocksY, by =>
         {
+            int blockY = by * loopIncr;
+            int blockXY = by * blocksX;
             for (int blockX = 0; blockX < maxCol; blockX += loopIncr)
             {
                 uint energy = AcEnergyCu(fenc, blockX, blockY, p.internalCsp, p.qgSize);
                 double qpAdj = strength * (Math.Log2(Math.Max(energy, 1)) - (double)(modeOneConst + (2 * (X265_DEPTH - 8))));
                 qpAqOffset[blockXY++] = qpAdj;
             }
-        }
+        });
 
         return qpAqOffset;
     }
