@@ -757,22 +757,16 @@ public static partial class HeifCoder
             uint h = BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(pasp.Off)), v = BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(pasp.Off + 4));
             if (h > 0 && v > 0) frame.Metadata.PixelAspectRatio = new SharpImage.Metadata.PixelAspectRatio(h, v);
         }
-        uint[]? clap = null;
-        if (c.Property(pid, "clap") is { Len: >= 32 } cp)
-        {
-            clap = new uint[8];
-            for (int k = 0; k < 8; k++) clap[k] = BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(cp.Off + 4 * k));
-            if (Limits.Strict && CropRectFromCleanAperture(clap, (int)frame.Columns, (int)frame.Rows) == null)
-                throw new InvalidDataException("[Strict] clap property is invalid.");
-        }
-        int? irot = c.Property(pid, "irot") is { Len: >= 1 } ir ? data[ir.Off] & 3 : null;
-        int? imir = c.Property(pid, "imir") is { Len: >= 1 } im ? data[im.Off] & 1 : null;
+        // HEIC: every clap / irot / imir in property order, as libheif applies them; AVIF: the first of each, MIAF order
+        var steps = HeifTransformSteps(c, pid, propertyOrder: hevcItem);
+        if (Limits.Strict && steps.Find(s => s.Kind == 'c') is { Clap: { } strictClap }
+            && (hevcItem ? LibheifClapCrop(strictClap, (int)frame.Columns, (int)frame.Rows) : CropRectFromCleanAperture(strictClap, (int)frame.Columns, (int)frame.Rows)) == null)
+            throw new InvalidDataException("[Strict] clap property is invalid.");
         int preW = (int)frame.Columns, preH = (int)frame.Rows;
-        var shown = ApplyHeifTransforms(frame, clap, irot, imir, hevcItem);
+        var shown = ApplyHeifTransforms(frame, steps, hevcItem);
         if (primaryPlanes != null && primaryPlanes.W == preW && primaryPlanes.H == preH)
         {
-            var crop = clap != null ? LibheifClapCrop(clap, preW, preH) : null;
-            var tp = TransformPlanesLikeLibheif(primaryPlanes, crop, irot, imir);
+            var tp = TransformPlanesLikeLibheif(primaryPlanes, steps);
             if (tp.W == shown.Columns && tp.H == shown.Rows)
             {
                 using var yuv = tp.ToDecoded();
@@ -1069,21 +1063,34 @@ public static partial class HeifCoder
     // HEIF transformative properties are essential: the displayed image is clap-cropped, then rotated (irot, anti-
     // clockwise quarter turns), then mirrored (imir: 0 = top/bottom, 1 = left/right) — MIAF 7.3.6.7 order. The result
     // is display-oriented, so Orientation (and any EXIF orientation tag, which AVIF readers ignore) become top-left.
-    private static ImageFrame ApplyHeifTransforms(ImageFrame frame, uint[]? clap, int? irot, int? imir, bool libheifClap = false)
+    private static ImageFrame ApplyHeifTransforms(ImageFrame frame, List<HeifTransformStep> steps, bool libheifClap = false)
     {
         var src = frame;
-        if (clap != null && (libheifClap ? LibheifClapCrop(clap, (int)frame.Columns, (int)frame.Rows) : CropRectFromCleanAperture(clap, (int)frame.Columns, (int)frame.Rows)) is { } r
-            && (r.X != 0 || r.Y != 0 || r.W != frame.Columns || r.H != frame.Rows))
-            frame = SharpImage.Transform.Geometry.Crop(frame, r.X, r.Y, r.W, r.H);
-        if (irot is 1 or 2 or 3)
-            frame = SharpImage.Transform.Geometry.Rotate(frame, irot switch
+        foreach (var step in steps)
+        {
+            var prev = frame;
+            if (step.Kind == 'c')
             {
-                1 => SharpImage.Transform.RotationAngle.Rotate270,   // 90° anti-clockwise
-                2 => SharpImage.Transform.RotationAngle.Rotate180,
-                _ => SharpImage.Transform.RotationAngle.Rotate90,    // 270° anti-clockwise
-            });
-        if (imir == 0) frame = SharpImage.Transform.Geometry.Flip(frame);
-        else if (imir == 1) frame = SharpImage.Transform.Geometry.Flop(frame);
+                if ((libheifClap ? LibheifClapCrop(step.Clap!, (int)frame.Columns, (int)frame.Rows) : CropRectFromCleanAperture(step.Clap!, (int)frame.Columns, (int)frame.Rows)) is { } r
+                    && (r.X != 0 || r.Y != 0 || r.W != frame.Columns || r.H != frame.Rows))
+                    frame = SharpImage.Transform.Geometry.Crop(frame, r.X, r.Y, r.W, r.H);
+            }
+            else if (step.Kind == 'r' && step.Value is 1 or 2 or 3)
+            {
+                frame = SharpImage.Transform.Geometry.Rotate(frame, step.Value switch
+                {
+                    1 => SharpImage.Transform.RotationAngle.Rotate270,   // 90° anti-clockwise
+                    2 => SharpImage.Transform.RotationAngle.Rotate180,
+                    _ => SharpImage.Transform.RotationAngle.Rotate90,    // 270° anti-clockwise
+                });
+            }
+            else if (step.Kind == 'm')
+            {
+                frame = step.Value == 0 ? SharpImage.Transform.Geometry.Flip(frame) : SharpImage.Transform.Geometry.Flop(frame);
+            }
+
+            if (!ReferenceEquals(prev, frame) && !ReferenceEquals(prev, src)) prev.Dispose();
+        }
 
         if (!ReferenceEquals(frame, src))
         {

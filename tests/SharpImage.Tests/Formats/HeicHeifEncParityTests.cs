@@ -80,6 +80,9 @@ public sealed class HeicHeifEncParityTests
     [Arguments("clap_odd_left.heic", "0b449610a75182cf7d901b5ed8b1cea296569e97b67e94374f99b8b0875cca63")]
     [Arguments("clap_clamp.heic", "aa98a65742edb72a23485c72918aec64b1c95cdfbbbfc6136debb71a24e369ff")]
     [Arguments("clap_third.heic", "f5cbe004c3d8643e8de643f83e0647c182b9be0c13984f49e8326fea08b2fffb")]
+    // transformative properties in their ipma order (irot / imir before clap), as libheif applies them
+    [Arguments("order_irot_clap.heic", "ebb7cedae6ca4dee5881903fe4dfb48f98ec4060f9daa7e59795f47cf82a41d5")]
+    [Arguments("order_imir_clap.heic", "aa5d1a0b4d10ec320694e1b652ccb5bd2025c0ce5e8ef25f28bc7f9b5fc1473b")]
     public async Task Decode_MatchesHeifDec(string file, string sha256)
     {
         using var image = FormatRegistry.Read(Asset(file));

@@ -132,10 +132,8 @@ public static partial class HeifCoder
     private static bool HevcTransformsNeed444(HeifContainer c, int pid, int tile0, int outW, int outH)
     {
         var data = c.Data;
-        bool hasClap = c.Property(pid, "clap") is { Len: >= 32 };
-        int? irot = c.Property(pid, "irot") is { Len: >= 1 } ir ? data[ir.Off] & 3 : null;
-        int? imir = c.Property(pid, "imir") is { Len: >= 1 } im ? data[im.Off] & 1 : null;
-        if (!hasClap && irot is null or 0 && imir is null) return false;
+        var steps = HeifTransformSteps(c, pid, propertyOrder: true);
+        if (steps.Count == 0) return false;
         byte[]? hvcC = c.Property(tile0, "hvcC") is { } hp ? data.AsSpan(hp.Off, hp.Len).ToArray() : null;
         if (hvcC == null || hvcC.Length < 23) return false;
         var chroma = (Hevc.HevcChromaFormat)(hvcC[16] & 3);
@@ -147,15 +145,51 @@ public static partial class HeifCoder
             (w, h) = ispe;
         }
 
-        (int X, int Y, int W, int H)? crop = null;
-        if (c.Property(pid, "clap") is { Len: >= 32 } cp)
+        return HeifTransformNeeds444(chroma, w, h, steps);
+    }
+
+    /// <summary>A transformative property: 'c' clap (its 8 values), 'r' irot (anti-clockwise quarter turns), 'm' imir
+    /// (0 = top / bottom, 1 = left / right).</summary>
+    private readonly record struct HeifTransformStep(char Kind, uint[]? Clap, int Value);
+
+    // The item's transformative properties: in property order (libheif ImageItem::decode_image applies each), or the
+    // first clap, irot and imir in that order (MIAF 7.3.6.7)
+    private static List<HeifTransformStep> HeifTransformSteps(HeifContainer c, int id, bool propertyOrder)
+    {
+        var steps = new List<HeifTransformStep>();
+        var data = c.Data;
+        if (!c.Items.TryGetValue(id, out var item)) return steps;
+        HeifTransformStep? Step(string type, int off, int len) => type switch
+        {
+            "clap" when len >= 32 => new HeifTransformStep('c', ReadClap(off), 0),
+            "irot" when len >= 1 => new HeifTransformStep('r', null, data[off] & 3),
+            "imir" when len >= 1 => new HeifTransformStep('m', null, data[off] & 1),
+            _ => null,
+        };
+
+        uint[] ReadClap(int off)
         {
             var clap = new uint[8];
-            for (int k = 0; k < 8; k++) clap[k] = System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(cp.Off + (4 * k)));
-            crop = LibheifClapCrop(clap, w, h);
+            for (int k = 0; k < 8; k++) clap[k] = System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(off + (4 * k)));
+            return clap;
         }
 
-        return HeifTransformNeeds444(chroma, w, h, crop, irot, imir);
+        if (propertyOrder)
+        {
+            foreach (var (t, off, len, _) in item.Properties)
+            {
+                if (Step(t, off, len) is { } s) steps.Add(s);
+            }
+        }
+        else
+        {
+            foreach (string t in new[] { "clap", "irot", "imir" })
+            {
+                if (c.Property(id, t) is { } p && Step(t, p.Off, p.Len) is { } s) steps.Add(s);
+            }
+        }
+
+        return steps;
     }
 
     // libheif's clean-aperture crop (Box_clap::get_crop, clamped as ImageItem::decode_image clamps it): left rounded
@@ -247,32 +281,34 @@ public static partial class HeifCoder
 
     // Whether libheif converts the decoded image to YCbCr 4:4:4 (bilinear chroma) for one of the transformations
     // (HeifPixelImage::crop / rotate_ccw / mirror_inplace): a step that would split the subsampled chroma.
-    private static bool HeifTransformNeeds444(Hevc.HevcChromaFormat chroma, int w, int h, (int X, int Y, int W, int H)? crop, int? irot, int? imir)
+    private static bool HeifTransformNeeds444(Hevc.HevcChromaFormat chroma, int w, int h, List<HeifTransformStep> steps)
     {
         if (chroma is not (Hevc.HevcChromaFormat.Chroma420 or Hevc.HevcChromaFormat.Chroma422)) return false;
         bool is420 = chroma == Hevc.HevcChromaFormat.Chroma420;
-        if (crop is { } c)
+        foreach (var step in steps)
         {
-            if ((c.X & 1) == 1 || (is420 && (c.Y & 1) == 1)) return true;
-            (w, h) = (c.W, c.H);
-        }
-
-        int angle = irot is 1 or 2 or 3 ? irot.Value * 90 : 0;
-        if (angle != 0)
-        {
-            bool oddW = (w & 1) == 1, oddH = (h & 1) == 1;
-            if (is420 ? (angle == 90 && oddW) || (angle == 180 && (oddW || oddH)) || (angle == 270 && oddH)
-                      : angle is 90 or 270 || (angle == 180 && oddH))
+            if (step.Kind == 'c')
             {
-                return true;
+                if (LibheifClapCrop(step.Clap!, w, h) is not { } c) continue;
+                if ((c.X & 1) == 1 || (is420 && (c.Y & 1) == 1)) return true;
+                (w, h) = (c.W, c.H);
             }
+            else if (step.Kind == 'r' && step.Value != 0)
+            {
+                int angle = step.Value * 90;
+                bool oddW = (w & 1) == 1, oddH = (h & 1) == 1;
+                if (is420 ? (angle == 90 && oddW) || (angle == 180 && (oddW || oddH)) || (angle == 270 && oddH)
+                          : angle is 90 or 270 || (angle == 180 && oddH))
+                {
+                    return true;
+                }
 
-            if (angle != 180) (w, h) = (h, w);
-        }
-
-        if (imir is 0 or 1)
-        {
-            if (is420 ? (w & 1) == 1 || (h & 1) == 1 : imir == 1 && (w & 1) == 1) return true;
+                if (angle != 180) (w, h) = (h, w);
+            }
+            else if (step.Kind == 'm')
+            {
+                if (is420 ? (w & 1) == 1 || (h & 1) == 1 : step.Value == 1 && (w & 1) == 1) return true;
+            }
         }
 
         return false;
@@ -280,36 +316,38 @@ public static partial class HeifCoder
 
     // libheif's decode-time transformations on the planes: clap crop, irot (anti-clockwise), imir, converting to 4:4:4
     // (Op_YCbCr420 / 422_bilinear_to_YCbCr444) where a step needs it, as ImageItem::decode_image does.
-    private static YCbCrPlanes TransformPlanesLikeLibheif(YCbCrPlanes p, (int X, int Y, int W, int H)? crop, int? irot, int? imir)
+    private static YCbCrPlanes TransformPlanesLikeLibheif(YCbCrPlanes p, List<HeifTransformStep> steps)
     {
-        if (crop is { } c && (c.X != 0 || c.Y != 0 || c.W != p.W || c.H != p.H))
+        foreach (var step in steps)
         {
-            if (p.Chroma is Hevc.HevcChromaFormat.Chroma420 or Hevc.HevcChromaFormat.Chroma422
-                && ((c.X & 1) == 1 || (p.Chroma == Hevc.HevcChromaFormat.Chroma420 && (c.Y & 1) == 1)))
+            if (step.Kind == 'c')
             {
-                p = UpsampleTo444(p);
+                if (LibheifClapCrop(step.Clap!, p.W, p.H) is not { } c || (c.X == 0 && c.Y == 0 && c.W == p.W && c.H == p.H)) continue;
+                if (p.Chroma is Hevc.HevcChromaFormat.Chroma420 or Hevc.HevcChromaFormat.Chroma422
+                    && ((c.X & 1) == 1 || (p.Chroma == Hevc.HevcChromaFormat.Chroma420 && (c.Y & 1) == 1)))
+                {
+                    p = UpsampleTo444(p);
+                }
+
+                p = CropPlanes(p, c.X, c.Y, c.X + c.W - 1, c.Y + c.H - 1);
             }
-
-            p = CropPlanes(p, c.X, c.Y, c.X + c.W - 1, c.Y + c.H - 1);
-        }
-
-        int angle = irot is 1 or 2 or 3 ? irot.Value * 90 : 0;
-        if (angle != 0)
-        {
-            bool oddW = (p.W & 1) == 1, oddH = (p.H & 1) == 1;
-            bool need = p.Chroma == Hevc.HevcChromaFormat.Chroma420 ? (angle == 90 && oddW) || (angle == 180 && (oddW || oddH)) || (angle == 270 && oddH)
-                : p.Chroma == Hevc.HevcChromaFormat.Chroma422 && (angle is 90 or 270 || (angle == 180 && oddH));
-            if (need) p = UpsampleTo444(p);
-            p = RotatePlanes(p, angle);
-        }
-
-        if (imir is 0 or 1)
-        {
-            bool horizontal = imir == 1;
-            bool need = p.Chroma == Hevc.HevcChromaFormat.Chroma420 ? (p.W & 1) == 1 || (p.H & 1) == 1
-                : p.Chroma == Hevc.HevcChromaFormat.Chroma422 && horizontal && (p.W & 1) == 1;
-            if (need) p = UpsampleTo444(p);
-            MirrorPlanes(p, horizontal);
+            else if (step.Kind == 'r' && step.Value != 0)
+            {
+                int angle = step.Value * 90;
+                bool oddW = (p.W & 1) == 1, oddH = (p.H & 1) == 1;
+                bool need = p.Chroma == Hevc.HevcChromaFormat.Chroma420 ? (angle == 90 && oddW) || (angle == 180 && (oddW || oddH)) || (angle == 270 && oddH)
+                    : p.Chroma == Hevc.HevcChromaFormat.Chroma422 && (angle is 90 or 270 || (angle == 180 && oddH));
+                if (need) p = UpsampleTo444(p);
+                p = RotatePlanes(p, angle);
+            }
+            else if (step.Kind == 'm')
+            {
+                bool horizontal = step.Value == 1;
+                bool need = p.Chroma == Hevc.HevcChromaFormat.Chroma420 ? (p.W & 1) == 1 || (p.H & 1) == 1
+                    : p.Chroma == Hevc.HevcChromaFormat.Chroma422 && horizontal && (p.W & 1) == 1;
+                if (need) p = UpsampleTo444(p);
+                MirrorPlanes(p, horizontal);
+            }
         }
 
         return p;
