@@ -617,6 +617,13 @@ internal static unsafe class X265Encoder
             }
         }
 
+        RowFilter? rowFilter = p.bEnableLoopFilter || slice.m_bUseSao ? new RowFilter(arena, frame, cuGeoms, ctuGeomMap, initSliceContext) : null;
+        var sliceBufferedEntropy = new X265Entropy[numRows];
+        for (uint r = 0; r < numRows; r++)
+        {
+            sliceBufferedEntropy[r] = new X265Entropy(arena);
+        }
+
         // analysis (processRowEncoder) of every CTU row
         var completed = new int[numRows];
         if (workers == 1)
@@ -651,6 +658,16 @@ internal static unsafe class X265Encoder
                     }
                 }, 16 * 1024 * 1024) { IsBackground = true };
                 threads[i].Start();
+            }
+
+            // meanwhile, row r's filters and final bitstream once the analysis of row r + 1 is done
+            for (uint row = 0; row < numRows; row++)
+            {
+                ref int below = ref completed[Math.Min(row + 1, numRows - 1)];
+                var spin = new System.Threading.SpinWait();
+                while (System.Threading.Volatile.Read(ref below) < numCols && failure == null) spin.SpinOnce();
+                if (failure != null) break;
+                FilterAndEncodeRow(row);
             }
 
             foreach (var t in threads) t.Join();
@@ -709,33 +726,44 @@ internal static unsafe class X265Encoder
             }
         }
 
-        // loop filters (FrameFilter::processRow for each row, in order)
-        if (p.bEnableLoopFilter || slice.m_bUseSao)
+        if (workers == 1)
         {
-            RunFilters(arena, frame, cuGeoms, ctuGeomMap, initSliceContext);
+            for (uint row = 0; row < numRows; row++)
+            {
+                FilterAndEncodeRow(row);
+            }
         }
 
-        // final bitstream when SAO is on (encodeSlice)
-        if (slice.m_bUseSao)
+        if (slice.m_bUseSao && !p.bEnableWavefront)
         {
-            X265SaoParam saoParam = frame.m_saoParam!;
-            for (uint i = 0; i < numRows; i++)
+            entropyCoder.FinishSlice();
+        }
+
+        // the loop filters of a row (FrameFilter::processRow), then its final bitstream when SAO is on (encodeSlice)
+        void FilterAndEncodeRow(uint row)
+        {
+            rowFilter?.ProcessRow((int)row);
+            if (!slice.m_bUseSao)
             {
-                outStreams[i].ResetBits();
+                return;
             }
 
-            entropyCoder.Load(initSliceContext);
-            for (uint cuAddr = 0; cuAddr < sps.numCUsInFrame; cuAddr++)
+            X265SaoParam saoParam = frame.m_saoParam!;
+            if (row == 0)
+            {
+                entropyCoder.Load(initSliceContext);
+            }
+
+            for (uint cuAddr = row * numCols; cuAddr < (row + 1) * numCols; cuAddr++)
             {
                 uint col = cuAddr % numCols;
-                uint row = cuAddr / numCols;
                 uint subStrm = row % numSubstreams;
                 X265CuData ctu = frame.GetPicCTU(cuAddr);
                 entropyCoder.SetBitstream(outStreams[subStrm]);
                 if (p.bEnableWavefront && col == 0 && row != 0)
                 {
                     entropyCoder.CopyState(initSliceContext);
-                    entropyCoder.LoadContexts(bufferedEntropy[row - 1]);
+                    entropyCoder.LoadContexts(sliceBufferedEntropy[row - 1]);
                 }
 
                 if (ctu.m_bFirstRowInSlice != 0 && col == 0)
@@ -777,7 +805,7 @@ internal static unsafe class X265Encoder
                 {
                     if (col == 1)
                     {
-                        bufferedEntropy[row].LoadContexts(entropyCoder);
+                        sliceBufferedEntropy[row].LoadContexts(entropyCoder);
                     }
 
                     if (col == numCols - 1)
@@ -785,11 +813,6 @@ internal static unsafe class X265Encoder
                         entropyCoder.FinishSlice();
                     }
                 }
-            }
-
-            if (!p.bEnableWavefront)
-            {
-                entropyCoder.FinishSlice();
             }
         }
 
@@ -809,27 +832,44 @@ internal static unsafe class X265Encoder
     }
 
     /// <summary>FrameFilter::ParallelFilter::processTasks for every row (all columns allowed), then the last row's SAO.</summary>
-    private static void RunFilters(X265Arena arena, X265FrameData frame, CUGeom* cuGeoms, uint[] ctuGeomMap, X265Entropy initState)
+    // FrameFilter::processRow: the deblocking and SAO steps of one CTU row (rows in order; row r once the analysis of
+    // row r + 1 is done, as its intra prediction reads row r unfiltered)
+    private sealed class RowFilter
     {
-        X265Param p = frame.m_param;
-        X265Slice slice = frame.m_slice;
-        int numCols = (int)slice.m_sps.numCuInWidth;
-        int numRows = (int)slice.m_sps.numCuInHeight;
-        bool useSao = slice.m_bUseSao;
-        X265SaoParam? saoParam = frame.m_saoParam;
-        X265PicYuv reconPic = frame.m_reconPic;
+        private readonly X265FrameData frame;
+        private readonly CUGeom* cuGeoms;
+        private readonly uint[] ctuGeomMap;
+        private readonly X265Param p;
+        private readonly int numCols, numRows;
+        private readonly bool useSao;
+        private readonly X265SaoParam? saoParam;
+        private readonly X265PicYuv reconPic;
+        private readonly X265Sao[] sao;
 
-        var sao = new X265Sao[numRows];
-        if (useSao)
+        public RowFilter(X265Arena arena, X265FrameData frame, CUGeom* cuGeoms, uint[] ctuGeomMap, X265Entropy initState)
         {
-            for (int r = 0; r < numRows; r++)
+            this.frame = frame;
+            this.cuGeoms = cuGeoms;
+            this.ctuGeomMap = ctuGeomMap;
+            p = frame.m_param;
+            X265Slice slice = frame.m_slice;
+            numCols = (int)slice.m_sps.numCuInWidth;
+            numRows = (int)slice.m_sps.numCuInHeight;
+            useSao = slice.m_bUseSao;
+            saoParam = frame.m_saoParam;
+            reconPic = frame.m_reconPic;
+            sao = new X265Sao[numRows];
+            if (useSao)
             {
-                sao[r] = new X265Sao(arena, p);
-                sao[r].StartSlice(frame, initState);
+                for (int r = 0; r < numRows; r++)
+                {
+                    sao[r] = new X265Sao(arena, p);
+                    sao[r].StartSlice(frame, initState);
+                }
             }
         }
 
-        void ProcessSaoCTU(int row, int col)
+        private void ProcessSaoCTU(int row, int col)
         {
             if (saoParam!.bSaoFlag[0])
             {
@@ -842,9 +882,9 @@ internal static unsafe class X265Encoder
             }
         }
 
-        for (int row = 0; row < numRows; row++)
+        public void ProcessRow(int row)
         {
-            uint rowAddr = (uint)(row * numCols);
+        uint rowAddr = (uint)(row * numCols);
             for (int col = 0; col < numCols; col++)
             {
                 uint cuAddr = rowAddr + (uint)col;
@@ -853,7 +893,7 @@ internal static unsafe class X265Encoder
                 {
                     X265Deblock.DeblockCTU(ctu, cuGeoms + ctuGeomMap[cuAddr], X265Deblock.EDGE_VER);
                 }
-
+    
                 if (col >= 1)
                 {
                     X265CuData ctuPrev = frame.GetPicCTU(cuAddr - 1);
@@ -861,7 +901,7 @@ internal static unsafe class X265Encoder
                     {
                         X265Deblock.DeblockCTU(ctuPrev, cuGeoms + ctuGeomMap[cuAddr - 1], X265Deblock.EDGE_HOR);
                     }
-
+    
                     if (useSao)
                     {
                         sao[row].CopySaoAboveRef(ctuPrev, reconPic, cuAddr - 1, col - 1);
@@ -869,7 +909,7 @@ internal static unsafe class X265Encoder
                         {
                             sao[row].RdoSaoUnitCu(saoParam!, ctu.m_bFirstRowInSlice != 0 ? 0 : (int)rowAddr, col - 2, (int)cuAddr - 2);
                         }
-
+    
                         if (ctu.m_bFirstRowInSlice == 0 && col >= 3)
                         {
                             ProcessSaoCTU(row - 1, col - 3);
@@ -877,7 +917,7 @@ internal static unsafe class X265Encoder
                     }
                 }
             }
-
+    
             {
                 uint cuAddr = rowAddr + (uint)numCols - 1;
                 X265CuData ctuPrev = frame.GetPicCTU(cuAddr);
@@ -885,7 +925,7 @@ internal static unsafe class X265Encoder
                 {
                     X265Deblock.DeblockCTU(ctuPrev, cuGeoms + ctuGeomMap[cuAddr], X265Deblock.EDGE_HOR);
                 }
-
+    
                 if (useSao)
                 {
                     X265CuData ctu = frame.GetPicCTU(rowAddr + (uint)Math.Max(numCols - 2, 0));
@@ -894,29 +934,29 @@ internal static unsafe class X265Encoder
                     {
                         sao[row].RdoSaoUnitCu(saoParam!, ctu.m_bFirstRowInSlice != 0 ? 0 : (int)rowAddr, numCols - 2, (int)cuAddr - 1);
                     }
-
+    
                     if (numCols >= 1)
                     {
                         sao[row].RdoSaoUnitCu(saoParam!, ctuPrev.m_bFirstRowInSlice != 0 ? 0 : (int)rowAddr, numCols - 1, (int)cuAddr);
                     }
-
+    
                     if (ctuPrev.m_bFirstRowInSlice == 0 && numCols >= 3)
                     {
                         ProcessSaoCTU(row - 1, numCols - 3);
                     }
-
+    
                     if (ctuPrev.m_bFirstRowInSlice == 0 && numCols >= 2)
                     {
                         ProcessSaoCTU(row - 1, numCols - 2);
                     }
-
+    
                     if (ctuPrev.m_bFirstRowInSlice == 0 && numCols >= 1)
                     {
                         ProcessSaoCTU(row - 1, numCols - 1);
                     }
                 }
             }
-
+    
             // the last row of CTUs: its own SAO
             if (row == numRows - 1 && useSao)
             {

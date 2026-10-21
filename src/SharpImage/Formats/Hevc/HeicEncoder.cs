@@ -23,7 +23,7 @@ internal static class HeicEncoder
     /// <param name="exif">EXIF (raw TIFF data, or anything that contains the TIFF header) as an 'Exif' item, or null.</param>
     /// <param name="xmp">An XMP packet (a 'mime' item, application/rdf+xml), or null.</param>
     /// <param name="orientation">EXIF orientation 1..8, stored as irot/imir.</param>
-    public static byte[] Encode(ReadOnlySpan<byte> pixels, int width, int height, int channels, int quality, int? constantQp,
+    public static byte[] Encode(byte[] pixels, int width, int height, int channels, int quality, int? constantQp,
         int colorPrimaries = 1, int transferCharacteristics = 13, byte[]? icc = null, byte[]? exif = null, byte[]? xmp = null,
         int orientation = 1)
     {
@@ -96,7 +96,7 @@ internal static class HeicEncoder
     /// heif-enc encodes a 16-bit PNG: the samples reduced to 10 bits (<c>&gt;&gt; 6</c>), RGB through libheif's
     /// Op_RRGGBBxx_HDR_to_YCbCr420, x265's 10-bit (HIGH_BIT_DEPTH) build with the main10-intra profile.
     /// </summary>
-    public static byte[] Encode10(ReadOnlySpan<ushort> pixels, int width, int height, int channels, int quality, int? constantQp,
+    public static byte[] Encode10(ushort[] pixels, int width, int height, int channels, int quality, int? constantQp,
         int colorPrimaries = 1, int transferCharacteristics = 13, byte[]? icc = null, byte[]? exif = null, byte[]? xmp = null,
         int orientation = 1)
     {
@@ -175,6 +175,19 @@ internal static class HeicEncoder
 
     private static int RoundedSize(int s) => Math.Max((s + 1) & ~1, 64);
 
+    // body(first, end) over [0, count) in chunks of rows, in parallel when the picture is large enough
+    private static void ParallelRows(int count, Action<int, int> body)
+    {
+        const int chunk = 32;
+        if (count <= chunk * 2)
+        {
+            body(0, count);
+            return;
+        }
+
+        System.Threading.Tasks.Parallel.For(0, (count + chunk - 1) / chunk, i => body(i * chunk, Math.Min(count, (i + 1) * chunk)));
+    }
+
     // A tightly packed w x h plane, edge-replicated to pw x ph.
     private static T[] Pad<T>(T[] src, int w, int h, int pw, int ph)
     {
@@ -195,7 +208,7 @@ internal static class HeicEncoder
     /// libheif's Op_RRGGBBxx_HDR_to_YCbCr420 (BT.601 matrix, full range, float coefficients): luma per pixel, chroma from
     /// the float mean of each 2x2 block (edge samples repeated at odd edges), of the 10-bit samples.
     /// </summary>
-    private static (ushort[] Y, ushort[] Cb, ushort[] Cr) RgbToYCbCr420Hdr(ReadOnlySpan<ushort> rgb, int w, int h, int channels)
+    private static (ushort[] Y, ushort[] Cb, ushort[] Cr) RgbToYCbCr420Hdr(ushort[] rgb, int w, int h, int channels)
     {
         const float kr = 0.299f, kb = 0.114f;
         float kg = 1f - kr - kb;
@@ -205,16 +218,21 @@ internal static class HeicEncoder
         const float halfRange = 512;
 
         var y = new ushort[w * h];
-        for (int i = 0; i < y.Length; i++)
+        ParallelRows(h, (r0, r1) =>
         {
-            float r = rgb[i * channels] >> 6, g = rgb[(i * channels) + 1] >> 6, b = rgb[(i * channels) + 2] >> 6;
-            y[i] = ClipU16((r * kr) + (g * kg) + (b * kb), fullRange);
-        }
+            for (int i = r0 * w; i < r1 * w; i++)
+            {
+                float r = rgb[i * channels] >> 6, g = rgb[(i * channels) + 1] >> 6, b = rgb[(i * channels) + 2] >> 6;
+                y[i] = ClipU16((r * kr) + (g * kg) + (b * kb), fullRange);
+            }
+        });
 
         int cw = (w + 1) / 2, chh = (h + 1) / 2;
         var cb = new ushort[cw * chh];
         var cr = new ushort[cw * chh];
-        for (int yy = 0; yy < h; yy += 2)
+        ParallelRows(chh, (cy0, cy1) =>
+        {
+        for (int yy = cy0 * 2; yy < Math.Min(h, cy1 * 2); yy += 2)
         {
             int y2 = yy + 1 < h ? yy + 1 : yy;
             for (int x = 0; x < w; x += 2)
@@ -231,6 +249,7 @@ internal static class HeicEncoder
                 cr[((yy / 2) * cw) + (x / 2)] = ClipU16(halfRange + ((r * c20) + (g * c21) + (b * c22)), fullRange);
             }
         }
+        });
 
         return (y, cb, cr);
     }
@@ -246,7 +265,7 @@ internal static class HeicEncoder
     /// libheif's Op_RGB24_32_to_YCbCr (BT.601 matrix, full range, float coefficients) with 'average' 4:2:0 chroma
     /// (the integer mean of each 2x2 block, or of the 2 / 1 samples at an odd edge).
     /// </summary>
-    private static (byte[] Y, byte[] Cb, byte[] Cr) RgbToYCbCr420(ReadOnlySpan<byte> rgb, int w, int h, int channels)
+    private static (byte[] Y, byte[] Cb, byte[] Cr) RgbToYCbCr420(byte[] rgb, int w, int h, int channels)
     {
         const float kr = 0.299f, kb = 0.114f;
         float kg = 1f - kr - kb;
@@ -255,20 +274,25 @@ internal static class HeicEncoder
         float c20 = 0.5f, c21 = -kg / (1f - kr) / 2f, c22 = -kb / (1f - kr) / 2f;
 
         var y = new byte[w * h];
-        for (int r = 0; r < h; r++)
+        ParallelRows(h, (r0, r1) =>
         {
-            for (int x = 0; x < w; x++)
+            for (int r = r0; r < r1; r++)
             {
-                int o = ((r * w) + x) * channels;
-                float fr = rgb[o], fg = rgb[o + 1], fb = rgb[o + 2];
-                y[(r * w) + x] = ClipToByte((fr * c00) + (fg * c01) + (fb * c02));
+                for (int x = 0; x < w; x++)
+                {
+                    int o = ((r * w) + x) * channels;
+                    float fr = rgb[o], fg = rgb[o + 1], fb = rgb[o + 2];
+                    y[(r * w) + x] = ClipToByte((fr * c00) + (fg * c01) + (fb * c02));
+                }
             }
-        }
+        });
 
         int cw = (w + 1) / 2, chh = (h + 1) / 2;
         var cb = new byte[cw * chh];
         var cr = new byte[cw * chh];
-        for (int cy = 0; cy < chh; cy++)
+        ParallelRows(chh, (cy0, cy1) =>
+        {
+        for (int cy = cy0; cy < cy1; cy++)
         {
             int y0 = cy * 2, y1 = Math.Min(y0 + 1, h - 1);
             int ny = y1 > y0 ? 2 : 1;
@@ -309,6 +333,7 @@ internal static class HeicEncoder
                 cr[(cy * cw) + cx] = ClipToByte((fr * c20) + (fg * c21) + (fb * c22) + 128f);
             }
         }
+        });
 
         return (y, cb, cr);
     }
