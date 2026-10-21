@@ -42,7 +42,7 @@ internal static unsafe partial class X265Primitives
     /// <summary>
     /// scanPosLast: each coefficient group's nonzero flags (first scan position in the top bit, the last group's
     /// ending at its last nonzero coefficient), the signs of its nonzero coefficients (in scan order from bit 0) and
-    /// their count; returns the scan position of the last nonzero coefficient. A group's 4x4 block packed to bytes
+    /// their count (groups up to the last one); returns the scan position of the last nonzero coefficient. A group's 4x4 block packed to bytes
     /// (saturated: zero / sign kept) and put in scan order with pshufb.
     /// </summary>
     public static int ScanPosLast(ushort* scan, short* coeff, ushort* coeffSign, ushort* coeffFlag, byte* coeffNum, int numSig, int scanType, long trSize)
@@ -52,9 +52,7 @@ internal static unsafe partial class X265Primitives
             return ScanPosLastScalar(scan, coeff, coeffSign, coeffFlag, coeffNum, numSig);
         }
 
-        Unsafe.InitBlockUnaligned(coeffNum, 0, MLS_GRP_NUM);
-        Unsafe.InitBlockUnaligned(coeffFlag, 0, MLS_GRP_NUM * sizeof(ushort));
-        Unsafe.InitBlockUnaligned(coeffSign, 0, MLS_GRP_NUM * sizeof(ushort));
+        // (x265 clears the arrays first; every group up to the last is written below and no caller reads further)
         var fwd = s_scanFwd[scanType];
         var rev = s_scanRev[scanType];
         for (int cgIdx = 0; ; cgIdx++)

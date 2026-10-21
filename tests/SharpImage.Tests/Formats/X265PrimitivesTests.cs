@@ -170,7 +170,7 @@ public sealed class X265PrimitivesTests
             int a = X265.X265Primitives.ScanPosLast(scan, coeff, signA, flagA, numA, numSig, scanType, size);
             int b = X265.X265Primitives.ScanPosLastScalar(scan, coeff, signB, flagB, numB, numSig);
             if (a != b) bad++;
-            for (int g = 0; g < 64; g++)
+            for (int g = 0; g <= b >> 4; g++)
             {
                 if (numA[g] != numB[g] || signA[g] != signB[g] || flagA[g] != flagB[g]) bad++;
             }
