@@ -26,8 +26,8 @@ internal static unsafe partial class X265Primitives
     private static readonly TransformTables[] s_tx = { new(X265Tables.T4, 4), new(X265Tables.T8, 8), new(X265Tables.T16, 16), new(X265Tables.T32, 32) };
     private static readonly TransformTables s_dstTx = new(s_dst4Matrix, 4);
 
-    private static readonly Vector128<byte> RevShorts = Vector128.Create((byte)14, 15, 12, 13, 10, 11, 8, 9, 6, 7, 4, 5, 2, 3, 0, 1);
-    private static readonly Vector128<byte> EvenOddShorts = Vector128.Create((byte)0, 1, 4, 5, 8, 9, 12, 13, 2, 3, 6, 7, 10, 11, 14, 15);
+    private static Vector128<byte> RevShorts => Vector128.Create((byte)14, 15, 12, 13, 10, 11, 8, 9, 6, 7, 4, 5, 2, 3, 0, 1);
+    private static Vector128<byte> EvenOddShorts => Vector128.Create((byte)0, 1, 4, 5, 8, 9, 12, 13, 2, 3, 6, 7, 10, 11, 14, 15);
 
     /// <summary>
     /// Coefficient tables of an n-point transform with matrix T (T[k][j], k the frequency), each entry a pair of 16-bit

@@ -894,23 +894,16 @@ internal sealed unsafe partial class X265Entropy
     }
 
     // [patternSigCtx][posXinSubset][posYinSubset] (codeCoeffNxN / rdoQuant table_cnt)
-    internal static readonly byte[] TableCnt =
-    {
+    internal static ReadOnlySpan<byte> TableCnt =>
+    [
         2, 1, 1, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0,
         2, 2, 2, 2, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0,
         2, 1, 0, 0, 2, 1, 0, 0, 2, 1, 0, 0, 2, 1, 0, 0,
         2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
         0, 1, 4, 5, 2, 3, 4, 5, 6, 6, 8, 8, 7, 7, 8, 8,
-    };
+    ];
 
-    internal static readonly byte* TableCntPtr = Pin(TableCnt);
-
-    private static byte* Pin(byte[] a)
-    {
-        byte* p = (byte*)System.Runtime.InteropServices.NativeMemory.Alloc((nuint)a.Length);
-        for (int i = 0; i < a.Length; i++) p[i] = a[i];
-        return p;
-    }
+    internal static byte* TableCntPtr { [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)] get => X265Tables.Ptr(TableCnt); }
 
     public void CodeCoeffNxN(X265CuData cu, short* coeff, uint absPartIdx, uint log2TrSize, int ttype)
     {
@@ -1043,7 +1036,7 @@ internal sealed unsafe partial class X265Entropy
                             uint blkPos = scan4[scanPosSigOff];
                             uint sig = scanFlagMask & 1;
                             scanFlagMask >>= 1;
-                            uint ctxSig = TableCnt[(4 * 16) + blkPos];
+                            uint ctxSig = TableCntPtr[(4 * 16) + blkPos];
                             EncodeBin(sig, baseCtx + ctxSig);
                             absCoeff[numNonZero] = tmpCoeff[blkPos];
                             numNonZero += sig;
@@ -1062,7 +1055,7 @@ internal sealed unsafe partial class X265Entropy
                             scanFlagMask >>= 1;
                             if (scanPosSigOff != 0 || subSet == 0 || numNonZero != 0)
                             {
-                                uint cnt = (uint)(TableCnt[tabSigCtx + blkPos] + offset);
+                                uint cnt = (uint)(TableCntPtr[tabSigCtx + blkPos] + offset);
                                 uint ctxSig = (cnt + posOffset) & posZeroMask;
                                 EncodeBin(sig, baseCtx + ctxSig);
                             }

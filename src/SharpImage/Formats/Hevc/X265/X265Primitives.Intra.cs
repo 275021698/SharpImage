@@ -48,7 +48,7 @@ internal static unsafe partial class X265Primitives
         TransposeBytes(b.pred, width, dst, dstStride);
     }
 
-    private static readonly Vector128<byte> Transpose4x4Bytes = Vector128.Create((byte)0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15);
+    private static Vector128<byte> Transpose4x4Bytes => Vector128.Create((byte)0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15);
 
     // dst[x][y] = src[y][x] for an n x n block of bytes (src rows of n bytes)
     private static void TransposeBytes(byte* src, int n, byte* dst, long dstStride)
@@ -93,8 +93,8 @@ internal static unsafe partial class X265Primitives
         }
     }
 
-    private static readonly Vector128<byte> Pairs4x2 = Vector128.Create((byte)0, 1, 1, 2, 2, 3, 3, 4, 8, 9, 9, 10, 10, 11, 11, 12);
-    private static readonly Vector128<byte> Pairs8 = Vector128.Create((byte)0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8);
+    private static Vector128<byte> Pairs4x2 => Vector128.Create((byte)0, 1, 1, 2, 2, 3, 3, 4, 8, 9, 9, 10, 10, 11, 11, 12);
+    private static Vector128<byte> Pairs8 => Vector128.Create((byte)0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8);
 
     // the pmaddubsw weights (32 - f, f) of every byte pair
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

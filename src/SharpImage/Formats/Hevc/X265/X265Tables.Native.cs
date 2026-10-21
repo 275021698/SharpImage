@@ -1,4 +1,6 @@
-// Native copies of the tables read per coefficient / per partition in the hot loops (no bounds checks there).
+// Pointers to the tables read per coefficient / per partition in the hot loops (no bounds checks there).
+using System;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
 #if HIGH_BIT_DEPTH
@@ -9,20 +11,18 @@ namespace SharpImage.Formats.Hevc.X265;
 
 internal static unsafe partial class X265Tables
 {
-    internal static readonly uint* EntropyStateBitsPtr = Native(EntropyStateBits);
-    internal static readonly uint* EntropyBitsPtr = Native(EntropyBits);
-    internal static readonly byte* NextStatePtr = Native(NextState);
-    internal static readonly byte* GoRiceRangePtr = Native(GoRiceRange);
-    internal static readonly byte* LastCoeffTablePtr = Native(LastCoeffTable);
-    internal static readonly byte* ZscanToPelXPtr = Native(ZscanToPelX);
-    internal static readonly byte* ZscanToPelYPtr = Native(ZscanToPelY);
-    internal static readonly int* ZscanToRasterPtr = Native(ZscanToRaster);
-    internal static readonly int* RasterToZscanPtr = Native(RasterToZscan);
+    // pointers into the tables' RVA data (no bounds checks, and constant addresses: no static-constructor check, which
+    // Native AOT would otherwise do on every access)
+    internal static uint* EntropyStateBitsPtr { [MethodImpl(MethodImplOptions.AggressiveInlining)] get => Ptr(EntropyStateBits); }
+    internal static uint* EntropyBitsPtr { [MethodImpl(MethodImplOptions.AggressiveInlining)] get => Ptr(EntropyBits); }
+    internal static byte* NextStatePtr { [MethodImpl(MethodImplOptions.AggressiveInlining)] get => Ptr(NextState); }
+    internal static byte* GoRiceRangePtr { [MethodImpl(MethodImplOptions.AggressiveInlining)] get => Ptr(GoRiceRange); }
+    internal static byte* LastCoeffTablePtr { [MethodImpl(MethodImplOptions.AggressiveInlining)] get => Ptr(LastCoeffTable); }
+    internal static byte* ZscanToPelXPtr { [MethodImpl(MethodImplOptions.AggressiveInlining)] get => Ptr(ZscanToPelX); }
+    internal static byte* ZscanToPelYPtr { [MethodImpl(MethodImplOptions.AggressiveInlining)] get => Ptr(ZscanToPelY); }
+    internal static int* ZscanToRasterPtr { [MethodImpl(MethodImplOptions.AggressiveInlining)] get => Ptr(ZscanToRaster); }
+    internal static int* RasterToZscanPtr { [MethodImpl(MethodImplOptions.AggressiveInlining)] get => Ptr(RasterToZscan); }
 
-    private static T* Native<T>(T[] a) where T : unmanaged
-    {
-        T* p = (T*)NativeMemory.Alloc((nuint)(a.Length * sizeof(T)));
-        a.AsSpan().CopyTo(new System.Span<T>(p, a.Length));
-        return p;
-    }
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static T* Ptr<T>(ReadOnlySpan<T> rva) where T : unmanaged => (T*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(rva));
 }
