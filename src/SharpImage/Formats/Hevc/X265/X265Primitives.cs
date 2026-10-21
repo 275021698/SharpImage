@@ -667,6 +667,18 @@ internal static unsafe partial class X265Primitives
 
     public static void Dst4(short* src, short* dst, long srcStride)
     {
+        if (System.Runtime.Intrinsics.X86.Ssse3.IsSupported)
+        {
+            Dst4Simd(src, dst, srcStride);
+        }
+        else
+        {
+            Dst4Scalar(src, dst, srcStride);
+        }
+    }
+
+    internal static void Dst4Scalar(short* src, short* dst, long srcStride)
+    {
         short* coef = stackalloc short[16];
         short* block = stackalloc short[16];
         for (int i = 0; i < 4; i++)
@@ -681,7 +693,7 @@ internal static unsafe partial class X265Primitives
     /// <summary>primitives.cu[sizeIdx].dct.</summary>
     public static void Dct(int sizeIdx, short* src, short* dst, long srcStride)
     {
-        if (System.Runtime.Intrinsics.X86.Sse2.IsSupported)
+        if (System.Runtime.Intrinsics.X86.Ssse3.IsSupported)
         {
             DctSimd(sizeIdx, src, dst, srcStride);
         }
@@ -725,6 +737,18 @@ internal static unsafe partial class X265Primitives
 
     public static void Idst4(short* src, short* dst, long dstStride)
     {
+        if (System.Runtime.Intrinsics.X86.Ssse3.IsSupported)
+        {
+            Idst4Simd(src, dst, dstStride);
+        }
+        else
+        {
+            Idst4Scalar(src, dst, dstStride);
+        }
+    }
+
+    internal static void Idst4Scalar(short* src, short* dst, long dstStride)
+    {
         short* coef = stackalloc short[16];
         short* block = stackalloc short[16];
         InverseDst(src, coef, 7);
@@ -738,7 +762,7 @@ internal static unsafe partial class X265Primitives
     /// <summary>primitives.cu[sizeIdx].idct.</summary>
     public static void Idct(int sizeIdx, short* src, short* dst, long dstStride)
     {
-        if (System.Runtime.Intrinsics.X86.Sse2.IsSupported)
+        if (System.Runtime.Intrinsics.X86.Ssse3.IsSupported)
         {
             IdctSimd(sizeIdx, src, dst, dstStride);
         }
@@ -837,68 +861,59 @@ internal static unsafe partial class X265Primitives
         return numSig;
     }
 
-    /// <summary>nonPsyRdoQuant_c: uncoded costs of one 4x4 coefficient group.</summary>
-    public static void NonPsyRdoQuant(int log2TrSize, short* resiDctCoeff, long* costUncoded, ref long totalUncodedCost, ref long totalRdCost, uint blkPos)
+    /// <summary>nonPsyRdoQuant_c: uncoded costs of one 4x4 coefficient group; returns what x265 adds to both totals
+    /// (the uncoded and the RD cost).</summary>
+    public static long NonPsyRdoQuant(int log2TrSize, short* resiDctCoeff, long* costUncoded, uint blkPos)
     {
         int transformShift = MAX_TR_DYNAMIC_RANGE - X265_DEPTH - log2TrSize;
         int scaleBits = SCALE_BITS - (2 * transformShift);
         uint trSize = 1u << log2TrSize;
+        long sum = 0;
         for (int y = 0; y < MLS_CG_SIZE; y++)
         {
             for (int x = 0; x < MLS_CG_SIZE; x++)
             {
+                // (x265 round-trips this through a double: exact, the value is below 2^53)
                 long signCoef = resiDctCoeff[blkPos + x];
-                costUncoded[blkPos + x] = (long)(double)((signCoef * signCoef) << scaleBits);
-                totalUncodedCost += costUncoded[blkPos + x];
-                totalRdCost += costUncoded[blkPos + x];
+                long c = (signCoef * signCoef) << scaleBits;
+                costUncoded[blkPos + x] = c;
+                sum += c;
             }
 
             blkPos += trSize;
         }
+
+        return sum;
     }
 
     /// <summary>psyRdoQuant_c_1 then psyRdoQuant_c_2 (x265's non-AVX-512 path, which adds each group's cost to the
-    /// totals twice: once without and once with the psy term).</summary>
-    public static void PsyRdoQuant12(int log2TrSize, short* resiDctCoeff, short* fencDctCoeff, long* costUncoded, ref long totalUncodedCost,
-        ref long totalRdCost, long psyScale, uint blkPos)
+    /// totals twice: once without and once with the psy term); returns that sum.</summary>
+    public static long PsyRdoQuant12(int log2TrSize, short* resiDctCoeff, short* fencDctCoeff, long* costUncoded, long psyScale, uint blkPos)
     {
         int transformShift = MAX_TR_DYNAMIC_RANGE - X265_DEPTH - log2TrSize;
         int scaleBits = SCALE_BITS - (2 * transformShift);
         uint trSize = 1u << log2TrSize;
         int max = Math.Max(0, (2 * transformShift) + 1);
-        uint p = blkPos;
-        for (int y = 0; y < MLS_CG_SIZE; y++)
+        long sum = 0;
+        for (int y = 0; y < MLS_CG_SIZE; y++, blkPos += trSize)
         {
             for (int x = 0; x < MLS_CG_SIZE; x++)
             {
-                long signCoef = resiDctCoeff[p + x];
-                costUncoded[p + x] = (long)(double)((signCoef * signCoef) << scaleBits);
-                totalUncodedCost += costUncoded[p + x];
-                totalRdCost += costUncoded[p + x];
+                long signCoef = resiDctCoeff[blkPos + x];
+                long c = (signCoef * signCoef) << scaleBits;
+                long predictedCoef = fencDctCoeff[blkPos + x] - signCoef;
+                long cp = c - ((psyScale * predictedCoef) >> max);
+                costUncoded[blkPos + x] = cp;
+                sum += c + cp;
             }
-
-            p += trSize;
         }
 
-        p = blkPos;
-        for (int y = 0; y < MLS_CG_SIZE; y++)
-        {
-            for (int x = 0; x < MLS_CG_SIZE; x++)
-            {
-                long signCoef = resiDctCoeff[p + x];
-                long predictedCoef = fencDctCoeff[p + x] - signCoef;
-                costUncoded[p + x] -= (long)(double)((psyScale * predictedCoef) >> max);
-                totalUncodedCost += costUncoded[p + x];
-                totalRdCost += costUncoded[p + x];
-            }
-
-            p += trSize;
-        }
+        return sum;
     }
 
     // ---- entropy cost kernels ----
 
-    public static int ScanPosLast(ushort* scan, short* coeff, ushort* coeffSign, ushort* coeffFlag, byte* coeffNum, int numSig)
+    internal static int ScanPosLastScalar(ushort* scan, short* coeff, ushort* coeffSign, ushort* coeffFlag, byte* coeffNum, int numSig)
     {
         Unsafe.InitBlockUnaligned(coeffNum, 0, MLS_GRP_NUM);
         Unsafe.InitBlockUnaligned(coeffFlag, 0, MLS_GRP_NUM * sizeof(ushort));
@@ -1301,6 +1316,18 @@ internal static unsafe partial class X265Primitives
 
     /// <summary>all_angs_pred_c: modes 2..34, horizontal modes stored transposed.</summary>
     public static void AllAngsPred(int log2Size, pixel* dest, pixel* refPix, pixel* filtPix, int bLuma)
+    {
+#if !HIGH_BIT_DEPTH
+        if (System.Runtime.Intrinsics.X86.Ssse3.IsSupported)
+        {
+            AllAngsPred8(log2Size, dest, refPix, filtPix, bLuma);
+            return;
+        }
+#endif
+        AllAngsPredScalar(log2Size, dest, refPix, filtPix, bLuma);
+    }
+
+    internal static void AllAngsPredScalar(int log2Size, pixel* dest, pixel* refPix, pixel* filtPix, int bLuma)
     {
         int size = 1 << log2Size;
         for (int mode = 2; mode <= 34; mode++)

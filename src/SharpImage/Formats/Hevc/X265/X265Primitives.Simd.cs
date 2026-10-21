@@ -22,6 +22,84 @@ using sse_t = uint;
 
 internal static unsafe partial class X265Primitives
 {
+    // per scan type: byte p = raster index of 4x4 scan position p (forward), of position 15 - p (reverse)
+    private static readonly Vector128<byte>[] s_scanFwd = BuildScanMasks(false);
+    private static readonly Vector128<byte>[] s_scanRev = BuildScanMasks(true);
+
+    private static Vector128<byte>[] BuildScanMasks(bool reverse)
+    {
+        var masks = new Vector128<byte>[3];
+        Span<byte> b = stackalloc byte[16];
+        for (int t = 0; t < 3; t++)
+        {
+            for (int p = 0; p < 16; p++) b[p] = (byte)X265Tables.Scan4x4[(t * 16) + (reverse ? 15 - p : p)];
+            masks[t] = Vector128.Create((ReadOnlySpan<byte>)b);
+        }
+
+        return masks;
+    }
+
+    /// <summary>
+    /// scanPosLast: each coefficient group's nonzero flags (first scan position in the top bit, the last group's
+    /// ending at its last nonzero coefficient), the signs of its nonzero coefficients (in scan order from bit 0) and
+    /// their count; returns the scan position of the last nonzero coefficient. A group's 4x4 block packed to bytes
+    /// (saturated: zero / sign kept) and put in scan order with pshufb.
+    /// </summary>
+    public static int ScanPosLast(ushort* scan, short* coeff, ushort* coeffSign, ushort* coeffFlag, byte* coeffNum, int numSig, int scanType, long trSize)
+    {
+        if (!System.Runtime.Intrinsics.X86.Ssse3.IsSupported)
+        {
+            return ScanPosLastScalar(scan, coeff, coeffSign, coeffFlag, coeffNum, numSig);
+        }
+
+        Unsafe.InitBlockUnaligned(coeffNum, 0, MLS_GRP_NUM);
+        Unsafe.InitBlockUnaligned(coeffFlag, 0, MLS_GRP_NUM * sizeof(ushort));
+        Unsafe.InitBlockUnaligned(coeffSign, 0, MLS_GRP_NUM * sizeof(ushort));
+        var fwd = s_scanFwd[scanType];
+        var rev = s_scanRev[scanType];
+        for (int cgIdx = 0; ; cgIdx++)
+        {
+            short* cg = coeff + scan[cgIdx << 4];
+            var r01 = Vector128.Create(*(long*)cg, *(long*)(cg + trSize)).AsInt16();
+            var r23 = Vector128.Create(*(long*)(cg + (2 * trSize)), *(long*)(cg + (3 * trSize))).AsInt16();
+            var b = System.Runtime.Intrinsics.X86.Sse2.PackSignedSaturate(r01, r23).AsByte();
+            var zero = Vector128.Equals(b, Vector128<byte>.Zero);
+            uint nz = ~System.Runtime.Intrinsics.X86.Ssse3.Shuffle(zero, fwd).ExtractMostSignificantBits() & 0xFFFF;
+            uint nzRev = ~System.Runtime.Intrinsics.X86.Ssse3.Shuffle(zero, rev).ExtractMostSignificantBits() & 0xFFFF;
+            uint neg = System.Runtime.Intrinsics.X86.Ssse3.Shuffle(b, fwd).ExtractMostSignificantBits();
+            int num = BitOperations.PopCount(nz);
+            coeffNum[cgIdx] = (byte)num;
+            coeffSign[cgIdx] = (ushort)ExtractBits(neg, nz);
+            numSig -= num;
+            if (numSig <= 0)
+            {
+                int lastPos = 31 - BitOperations.LeadingZeroCount(nz);
+                coeffFlag[cgIdx] = (ushort)(nzRev >> (15 - lastPos));
+                return (cgIdx << 4) + lastPos;
+            }
+
+            coeffFlag[cgIdx] = (ushort)nzRev;
+        }
+    }
+
+    // the bits of value at the set bits of mask, packed from bit 0 (pext)
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static uint ExtractBits(uint value, uint mask)
+    {
+        if (System.Runtime.Intrinsics.X86.Bmi2.IsSupported)
+        {
+            return System.Runtime.Intrinsics.X86.Bmi2.ParallelBitExtract(value, mask);
+        }
+
+        uint r = 0;
+        for (int k = 0; mask != 0; mask &= mask - 1, k++)
+        {
+            r |= ((value >> BitOperations.TrailingZeroCount(mask)) & 1) << k;
+        }
+
+        return r;
+    }
+
     /// <summary>nquant: |clip16(sign * ((|coef| * q + add) >> qBits))| stored as int16 (32768 wraps as in x265), the
     /// number of nonzero levels returned.</summary>
     public static uint NQuant(short* coef, int* quantCoeff, short* qCoef, int qBits, int add, int numCoeff)

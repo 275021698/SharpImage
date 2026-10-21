@@ -14,7 +14,7 @@ public sealed class X265PrimitivesTests
     [Arguments(10)]
     public async Task Dct_SimdMatchesScalar(int depth)
     {
-        if (!System.Runtime.Intrinsics.X86.Sse2.IsSupported) return;
+        if (!System.Runtime.Intrinsics.X86.Ssse3.IsSupported) return;
         await Assert.That(DctMismatches(depth)).IsEqualTo(0);
     }
 
@@ -23,7 +23,7 @@ public sealed class X265PrimitivesTests
     [Arguments(10)]
     public async Task Idct_SimdMatchesScalar(int depth)
     {
-        if (!System.Runtime.Intrinsics.X86.Sse2.IsSupported) return;
+        if (!System.Runtime.Intrinsics.X86.Ssse3.IsSupported) return;
         await Assert.That(IdctMismatches(depth)).IsEqualTo(0);
     }
 
@@ -48,6 +48,88 @@ public sealed class X265PrimitivesTests
     public async Task ResidualAndReconstruction_SimdMatchScalar()
     {
         await Assert.That(ResidualMismatches()).IsEqualTo(0);
+    }
+
+    [Test]
+    public async Task ScanPosLast_SimdMatchesScalar()
+    {
+        await Assert.That(ScanPosLastMismatches()).IsEqualTo(0);
+    }
+
+    [Test]
+    public async Task AllAngles_SimdMatchesScalar()
+    {
+        await Assert.That(AllAnglesMismatches()).IsEqualTo(0);
+    }
+
+    // random and extreme neighbours, every size, with and without the edge filter
+    private static unsafe int AllAnglesMismatches()
+    {
+        var rnd = new Random(6);
+        int bad = 0;
+        byte* refPix = stackalloc byte[258 + 16];
+        byte* filtPix = stackalloc byte[258 + 16];
+        byte* a = stackalloc byte[33 * 32 * 32];
+        byte* b = stackalloc byte[33 * 32 * 32];
+        for (int iter = 0; iter < 800; iter++)
+        {
+            int log2 = 2 + (iter & 3), size = 1 << log2;
+            int kind = (iter >> 2) % 3;
+            for (int i = 0; i < 258 + 16; i++)
+            {
+                refPix[i] = (byte)(kind == 0 ? rnd.Next(256) : kind == 1 ? (rnd.Next(2) == 0 ? 0 : 255) : 128 + (i % 7));
+                filtPix[i] = (byte)rnd.Next(256);
+            }
+
+            int bLuma = (iter >> 3) & 1;
+            X265.X265Primitives.AllAngsPred(log2, a, refPix, filtPix, bLuma);
+            X265.X265Primitives.AllAngsPredScalar(log2, b, refPix, filtPix, bLuma);
+            for (int i = 0; i < 33 * size * size; i++) if (a[i] != b[i]) bad++;
+        }
+
+        return bad;
+    }
+
+    // every scan type and size, sparse to dense blocks with extreme levels
+    private static unsafe int ScanPosLastMismatches()
+    {
+        var rnd = new Random(5);
+        int bad = 0;
+        short* coeff = stackalloc short[32 * 32];
+        byte* numA = stackalloc byte[64]; byte* numB = stackalloc byte[64];
+        ushort* signA = stackalloc ushort[64]; ushort* signB = stackalloc ushort[64];
+        ushort* flagA = stackalloc ushort[64]; ushort* flagB = stackalloc ushort[64];
+        for (int iter = 0; iter < 20000; iter++)
+        {
+            int log2 = 2 + (iter & 3), size = 1 << log2;
+            int scanType = log2 <= 3 ? (iter >> 2) % 3 : 0;
+            int density = 1 + ((iter >> 4) % 6);
+            int numSig = 0;
+            for (int i = 0; i < size * size; i++)
+            {
+                int v = rnd.Next(density * 4) == 0 ? rnd.Next(-3, 4) : 0;
+                if (v != 0 && rnd.Next(8) == 0) v = rnd.Next(2) == 0 ? short.MaxValue : short.MinValue;
+                coeff[i] = (short)v;
+                if (v != 0) numSig++;
+            }
+
+            if (numSig == 0)
+            {
+                coeff[rnd.Next(size * size)] = 1;
+                numSig = 1;
+            }
+
+            ushort* scan = X265.X265Scan.ScanOrder[(scanType * 4) + log2 - 2];
+            int a = X265.X265Primitives.ScanPosLast(scan, coeff, signA, flagA, numA, numSig, scanType, size);
+            int b = X265.X265Primitives.ScanPosLastScalar(scan, coeff, signB, flagB, numB, numSig);
+            if (a != b) bad++;
+            for (int g = 0; g < 64; g++)
+            {
+                if (numA[g] != numB[g] || signA[g] != signB[g] || flagA[g] != flagB[g]) bad++;
+            }
+        }
+
+        return bad;
     }
 
     private static unsafe int ResidualMismatches()
@@ -217,7 +299,7 @@ public sealed class X265PrimitivesTests
         short* res = stackalloc short[32 * 40];
         short* a = stackalloc short[32 * 32];
         short* b = stackalloc short[32 * 32];
-        for (int iter = 0; iter < 400; iter++)
+        for (int iter = 0; iter < 4000; iter++)
         {
             int sizeIdx = iter & 3, n = 4 << sizeIdx;
             // residuals of every kind: full range, small, flat, extremes
@@ -237,6 +319,21 @@ public sealed class X265PrimitivesTests
             }
 
             for (int i = 0; i < n * n; i++) if (a[i] != b[i]) mismatches++;
+            if (sizeIdx == 0)
+            {
+                if (depth == 8)
+                {
+                    X265.X265Primitives.Dst4Simd(res, a, 40);
+                    X265.X265Primitives.Dst4Scalar(res, b, 40);
+                }
+                else
+                {
+                    X265Hbd.X265Primitives.Dst4Simd(res, a, 40);
+                    X265Hbd.X265Primitives.Dst4Scalar(res, b, 40);
+                }
+
+                for (int i = 0; i < 16; i++) if (a[i] != b[i]) mismatches++;
+            }
         }
 
         return mismatches;
@@ -249,7 +346,7 @@ public sealed class X265PrimitivesTests
         short* coef = stackalloc short[32 * 32];
         short* a = stackalloc short[32 * 40];
         short* b = stackalloc short[32 * 40];
-        for (int iter = 0; iter < 400; iter++)
+        for (int iter = 0; iter < 4000; iter++)
         {
             int sizeIdx = iter & 3, n = 4 << sizeIdx;
             int kind = (iter >> 2) % 4;
@@ -278,6 +375,23 @@ public sealed class X265PrimitivesTests
             for (int r = 0; r < n; r++)
                 for (int x = 0; x < n; x++)
                     if (a[(r * 40) + x] != b[(r * 40) + x]) mismatches++;
+            if (sizeIdx == 0)
+            {
+                if (depth == 8)
+                {
+                    X265.X265Primitives.Idst4Simd(coef, a, 40);
+                    X265.X265Primitives.Idst4Scalar(coef, b, 40);
+                }
+                else
+                {
+                    X265Hbd.X265Primitives.Idst4Simd(coef, a, 40);
+                    X265Hbd.X265Primitives.Idst4Scalar(coef, b, 40);
+                }
+
+                for (int r = 0; r < 4; r++)
+                    for (int x = 0; x < 4; x++)
+                        if (a[(r * 40) + x] != b[(r * 40) + x]) mismatches++;
+            }
         }
 
         return mismatches;

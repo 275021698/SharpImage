@@ -932,7 +932,7 @@ internal sealed unsafe partial class X265Entropy
         ushort* coeffFlag = stackalloc ushort[MLS_GRP_NUM];
 
         ulong sigCoeffGroupFlag64 = 0;
-        int scanPosLast = X265Primitives.ScanPosLast(codingParameters.scan, coeff, coeffSign, coeffFlag, coeffNum, (int)numSig);
+        int scanPosLast = X265Primitives.ScanPosLast(codingParameters.scan, coeff, coeffSign, coeffFlag, coeffNum, (int)numSig, (int)codingParameters.scanType, trSize);
         uint posLast = codingParameters.scan[scanPosLast];
         int lastScanSet = scanPosLast >> MLS_CG_SIZE;
 
