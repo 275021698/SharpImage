@@ -51,6 +51,45 @@ public sealed class X265PrimitivesTests
     }
 
     [Test]
+    public async Task CoefficientScans_SimdMatchScalar()
+    {
+        await Assert.That(CoefficientScanMismatches()).IsEqualTo(0);
+    }
+
+    // count_nonzero and findPosFirstLast (every scan type; odd / even levels, extremes)
+    private static unsafe int CoefficientScanMismatches()
+    {
+        var rnd = new Random(7);
+        int bad = 0;
+        short* c = stackalloc short[32 * 32];
+        short* dqA = stackalloc short[32 * 32];
+        short* dqB = stackalloc short[32 * 32];
+        for (int iter = 0; iter < 20000; iter++)
+        {
+            int density = 1 + (iter % 7);
+            for (int i = 0; i < 32 * 32; i++)
+            {
+                int v = rnd.Next(density * 2) == 0 ? rnd.Next(-5, 6) : 0;
+                if (v != 0 && rnd.Next(16) == 0) v = rnd.Next(2) == 0 ? short.MaxValue : short.MinValue;
+                c[i] = (short)v;
+            }
+
+            int n = 16 << (2 * (iter & 3));
+            if (X265.X265Primitives.CountNonzero(c, n) != X265.X265Primitives.CountNonzeroScalar(c, n)) bad++;
+            int scale = (iter & 1) != 0 ? 72 << 8 : (40 + (iter % 33)) << (iter % 9);
+            int shift = 1 + (iter % 12);
+            X265.X265Primitives.DequantNormal(c, dqA, n, scale, shift);
+            X265.X265Primitives.DequantNormalScalar(c, dqB, n, scale, shift);
+            for (int i = 0; i < n; i++) if (dqA[i] != dqB[i]) bad++;
+            ushort* scan4 = X265.X265Scan.Scan4x4[iter % 3];
+            long trSize = 4 << (iter & 3);
+            if (X265.X265Primitives.FindPosFirstLast(c + 4, trSize, scan4) != X265.X265Primitives.FindPosFirstLastScalar(c + 4, trSize, scan4)) bad++;
+        }
+
+        return bad;
+    }
+
+    [Test]
     public async Task ScanPosLast_SimdMatchesScalar()
     {
         await Assert.That(ScanPosLastMismatches()).IsEqualTo(0);
@@ -208,6 +247,8 @@ public sealed class X265PrimitivesTests
     {
         var rnd = new Random(8);
         int bad = 0;
+        byte* pa = stackalloc byte[32 * 32];
+        byte* pb = stackalloc byte[32 * 32];
         byte* a = stackalloc byte[48 * 48];
         byte* b = stackalloc byte[48 * 48];
         for (int iter = 0; iter < 2000; iter++)
@@ -220,6 +261,12 @@ public sealed class X265PrimitivesTests
             if (X265.X265Primitives.Satd4x4(a + o, 48, b, 48) != X265.X265Primitives.Satd4x4Scalar(a + o, 48, b, 48)) bad++;
             int n = 4 << (iter & 3);
             if (X265.X265Primitives.SsePP(a + o, 48, b, 48, n, n) != X265.X265Primitives.SsePPScalar(a + o, 48, b, 48, n, n)) bad++;
+            int sizeIdx = iter & 3;
+            if (sizeIdx < 3 && X265.X265Primitives.PsyCostPP(sizeIdx, a + o, 48, b, 48) != X265.X265Primitives.PsyCostPPScalar(sizeIdx, a + o, 48, b, 48)) bad++;
+            int log2 = 2 + (iter & 3);
+            X265.X265Primitives.PlanarPred(log2, pa, 32, a + o);
+            X265.X265Primitives.PlanarPredScalar(log2, pb, 32, a + o);
+            for (int i = 0; i < 32 * (1 << log2); i++) if (pa[i] != pb[i]) bad++;
             if (X265.X265Primitives.Sad(a + o, 48, b, 48, n, n) != X265.X265Primitives.SadScalar(a + o, 48, b, 48, n, n)) bad++;
         }
 

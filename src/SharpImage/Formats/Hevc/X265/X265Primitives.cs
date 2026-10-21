@@ -189,6 +189,27 @@ internal static unsafe partial class X265Primitives
     /// <summary>psyCost_pp: |AC energy(source) - AC energy(recon)| per 8x8 (4x4 uses satd).</summary>
     public static int PsyCostPP(int sizeIdx, pixel* source, long sstride, pixel* recon, long rstride)
     {
+#if !HIGH_BIT_DEPTH
+        if (sizeIdx != 0 && System.Runtime.Intrinsics.X86.Ssse3.IsSupported)
+        {
+            int dim8 = 1 << (sizeIdx + 2);
+            uint energy = 0;
+            for (int i = 0; i < dim8; i += 8)
+            {
+                for (int j = 0; j < dim8; j += 8)
+                {
+                    energy += (uint)Math.Abs(PsyEnergy8x8(source + (i * sstride) + j, sstride) - PsyEnergy8x8(recon + (i * rstride) + j, rstride));
+                }
+            }
+
+            return (int)energy;
+        }
+#endif
+        return PsyCostPPScalar(sizeIdx, source, sstride, recon, rstride);
+    }
+
+    internal static int PsyCostPPScalar(int sizeIdx, pixel* source, long sstride, pixel* recon, long rstride)
+    {
         if (sizeIdx != 0)
         {
             int dim = 1 << (sizeIdx + 2);
@@ -305,7 +326,7 @@ internal static unsafe partial class X265Primitives
         }
     }
 
-    public static int CountNonzero(short* quantCoeff, int numCoeff)
+    internal static int CountNonzeroScalar(short* quantCoeff, int numCoeff)
     {
         int count = 0;
         for (int i = 0; i < numCoeff; i++)
@@ -807,7 +828,7 @@ internal static unsafe partial class X265Primitives
 
     // ---- quantization ----
 
-    public static void DequantNormal(short* quantCoef, short* coef, int num, int scale, int shift)
+    internal static void DequantNormalScalar(short* quantCoef, short* coef, int num, int scale, int shift)
     {
         int add = 1 << (shift - 1);
         for (int n = 0; n < num; n++)
@@ -945,7 +966,7 @@ internal static unsafe partial class X265Primitives
         }
     }
 
-    public static uint FindPosFirstLast(short* dstCoeff, long trSize, ushort* scanTbl)
+    internal static uint FindPosFirstLastScalar(short* dstCoeff, long trSize, ushort* scanTbl)
     {
         int n;
         for (n = SCAN_SET_SIZE - 1; n >= 0; n--)
@@ -1173,6 +1194,18 @@ internal static unsafe partial class X265Primitives
     }
 
     public static void PlanarPred(int log2Size, pixel* dst, long dstStride, pixel* srcPix)
+    {
+#if !HIGH_BIT_DEPTH
+        if (System.Runtime.Intrinsics.X86.Sse2.IsSupported)
+        {
+            PlanarPred8(log2Size, dst, dstStride, srcPix);
+            return;
+        }
+#endif
+        PlanarPredScalar(log2Size, dst, dstStride, srcPix);
+    }
+
+    internal static void PlanarPredScalar(int log2Size, pixel* dst, long dstStride, pixel* srcPix)
     {
         int blkSize = 1 << log2Size;
         pixel* above = srcPix + 1;

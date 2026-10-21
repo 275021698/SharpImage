@@ -193,6 +193,9 @@ internal static unsafe partial class X265Primitives
     /// its result is taken.</summary>
     internal static int Sa8d8x8Raw(pixel* pix1, long i1, pixel* pix2, long i2)
     {
+#if !HIGH_BIT_DEPTH
+        if (System.Runtime.Intrinsics.X86.Ssse3.IsSupported) return Sa8d8x8Raw16(pix1, i1, pix2, i2);
+#endif
         if (!System.Runtime.Intrinsics.X86.Sse2.IsSupported) return Sa8d8x8RawScalar(pix1, i1, pix2, i2);
         LoadDiff8(pix1, pix2, out var l0, out var h0);
         LoadDiff8(pix1 + i1, pix2 + i2, out var l1, out var h1);
@@ -266,6 +269,12 @@ internal static unsafe partial class X265Primitives
     /// <summary>sse_pp: the sum of squared differences of a lx x ly block.</summary>
     public static sse_t SsePP(pixel* pix1, long stride1, pixel* pix2, long stride2, int lx, int ly)
     {
+#if !HIGH_BIT_DEPTH
+        if (System.Runtime.Intrinsics.X86.Sse2.IsSupported && (lx & 3) == 0)
+        {
+            return SsePP8(pix1, stride1, pix2, stride2, lx, ly);
+        }
+#endif
         if (!Vector128.IsHardwareAccelerated || lx < 4) return SsePPScalar(pix1, stride1, pix2, stride2, lx, ly);
         var acc = Vector128<int>.Zero;
         for (int y = 0; y < ly; y++, pix1 += stride1, pix2 += stride2)
@@ -303,6 +312,13 @@ internal static unsafe partial class X265Primitives
     /// <summary>getResidual: fenc - pred, n x n.</summary>
     public static void GetResidual(pixel* fenc, pixel* pred, short* residual, long stride, int n)
     {
+#if !HIGH_BIT_DEPTH
+        if (System.Runtime.Intrinsics.X86.Sse2.IsSupported)
+        {
+            GetResidual8(fenc, pred, residual, stride, n);
+            return;
+        }
+#endif
         if (!Vector128.IsHardwareAccelerated || n < 8)
         {
             GetResidualScalar(fenc, pred, residual, stride, n);
@@ -318,6 +334,13 @@ internal static unsafe partial class X265Primitives
     /// <summary>add_ps: clip(pred + residual) into a, n x n.</summary>
     public static void AddPS(pixel* a, long dstride, pixel* b0, short* b1, long sstride0, long sstride1, int n)
     {
+#if !HIGH_BIT_DEPTH
+        if (System.Runtime.Intrinsics.X86.Sse2.IsSupported)
+        {
+            AddPS8(a, dstride, b0, b1, sstride0, sstride1, n);
+            return;
+        }
+#endif
         if (!Vector128.IsHardwareAccelerated || n < 8)
         {
             AddPSScalar(a, dstride, b0, b1, sstride0, sstride1, n);
@@ -346,6 +369,13 @@ internal static unsafe partial class X265Primitives
     /// <summary>copy_ps: pixels to int16, n x n.</summary>
     public static void CopyPS(short* dst, long dstStride, pixel* src, long srcStride, int n)
     {
+#if !HIGH_BIT_DEPTH
+        if (System.Runtime.Intrinsics.X86.Sse2.IsSupported)
+        {
+            CopyPS8(dst, dstStride, src, srcStride, n);
+            return;
+        }
+#endif
         if (!Vector128.IsHardwareAccelerated || n < 8)
         {
             CopyPSScalar(dst, dstStride, src, srcStride, n);
