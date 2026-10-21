@@ -104,31 +104,30 @@ internal static unsafe partial class X265Primitives
     /// number of nonzero levels returned.</summary>
     public static uint NQuant(short* coef, int* quantCoeff, short* qCoef, int qBits, int add, int numCoeff)
     {
-        if (!Vector128.IsHardwareAccelerated) return NQuantScalar(coef, quantCoeff, qCoef, qBits, add, numCoeff);
+        if (!System.Runtime.Intrinsics.X86.Sse41.IsSupported) return NQuantScalar(coef, quantCoeff, qCoef, qBits, add, numCoeff);
         var vadd = Vector128.Create(add);
-        var lo = Vector128.Create(-32768);
-        var hi = Vector128.Create(32767);
-        uint zeros = 0;
+        byte sh = (byte)qBits;
+        int zeros = 0;
         for (int i = 0; i < numCoeff; i += 8)
         {
-            var (c0, c1) = Vector128.Widen(Vector128.Load(coef + i));
-            var l0 = Level(c0, Vector128.Load(quantCoeff + i));
-            var l1 = Level(c1, Vector128.Load(quantCoeff + i + 4));
-            zeros += (uint)BitOperations.PopCount(Vector128.ExtractMostSignificantBits(Vector128.Equals(l0, Vector128<int>.Zero)))
-                     + (uint)BitOperations.PopCount(Vector128.ExtractMostSignificantBits(Vector128.Equals(l1, Vector128<int>.Zero)));
-            Vector128.Narrow(Vector128.Abs(Signed(l0, c0)), Vector128.Abs(Signed(l1, c1))).Store(qCoef + i);
+            var c = System.Runtime.Intrinsics.X86.Sse2.LoadVector128(coef + i);
+            var c0 = System.Runtime.Intrinsics.X86.Sse41.ConvertToVector128Int32(c);
+            var c1 = System.Runtime.Intrinsics.X86.Sse41.ConvertToVector128Int32(System.Runtime.Intrinsics.X86.Sse2.ShiftRightLogical128BitLane(c, 8));
+            var l0 = System.Runtime.Intrinsics.X86.Sse2.ShiftRightArithmetic(System.Runtime.Intrinsics.X86.Sse2.Add(
+                System.Runtime.Intrinsics.X86.Sse41.MultiplyLow(System.Runtime.Intrinsics.X86.Ssse3.Abs(c0).AsInt32(), System.Runtime.Intrinsics.X86.Sse2.LoadVector128(quantCoeff + i)), vadd), sh);
+            var l1 = System.Runtime.Intrinsics.X86.Sse2.ShiftRightArithmetic(System.Runtime.Intrinsics.X86.Sse2.Add(
+                System.Runtime.Intrinsics.X86.Sse41.MultiplyLow(System.Runtime.Intrinsics.X86.Ssse3.Abs(c1).AsInt32(), System.Runtime.Intrinsics.X86.Sse2.LoadVector128(quantCoeff + i + 4)), vadd), sh);
+            // level * sign, saturated to int16, then |.| (|-32768| stays 0x8000, as x265's int16 store)
+            var m0 = System.Runtime.Intrinsics.X86.Sse2.ShiftRightArithmetic(c0, 31);
+            var m1 = System.Runtime.Intrinsics.X86.Sse2.ShiftRightArithmetic(c1, 31);
+            var p = System.Runtime.Intrinsics.X86.Sse2.PackSignedSaturate(
+                System.Runtime.Intrinsics.X86.Sse2.Subtract(System.Runtime.Intrinsics.X86.Sse2.Xor(l0, m0), m0),
+                System.Runtime.Intrinsics.X86.Sse2.Subtract(System.Runtime.Intrinsics.X86.Sse2.Xor(l1, m1), m1));
+            System.Runtime.Intrinsics.X86.Sse2.Store(qCoef + i, System.Runtime.Intrinsics.X86.Ssse3.Abs(p).AsInt16());
+            zeros += BitOperations.PopCount((uint)System.Runtime.Intrinsics.X86.Sse2.MoveMask(System.Runtime.Intrinsics.X86.Sse2.CompareEqual(p, Vector128<short>.Zero).AsByte()));
         }
 
-        return (uint)numCoeff - zeros;
-
-        Vector128<int> Level(Vector128<int> c, Vector128<int> q) => Vector128.ShiftRightArithmetic((Vector128.Abs(c) * q) + vadd, qBits);
-
-        // level * sign, clipped to int16
-        Vector128<int> Signed(Vector128<int> level, Vector128<int> c)
-        {
-            var m = Vector128.ShiftRightArithmetic(c, 31);
-            return Vector128.Min(Vector128.Max((level ^ m) - m, lo), hi);
-        }
+        return (uint)(numCoeff - (zeros >> 1));
     }
 
     // ---- Hadamard costs and SSE (int32 lanes: exact for both depths) ----
@@ -230,6 +229,9 @@ internal static unsafe partial class X265Primitives
     /// overflow: at most 16 x 4080).</summary>
     public static int Satd4x4(pixel* pix1, long stride1, pixel* pix2, long stride2)
     {
+#if !HIGH_BIT_DEPTH
+        if (System.Runtime.Intrinsics.X86.Ssse3.IsSupported) return Satd4x4x8(pix1, stride1, pix2, stride2);
+#endif
         if (!System.Runtime.Intrinsics.X86.Sse2.IsSupported) return Satd4x4Scalar(pix1, stride1, pix2, stride2);
         var r0 = LoadDiff4(pix1, pix2);
         var r1 = LoadDiff4(pix1 + stride1, pix2 + stride2);

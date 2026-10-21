@@ -379,6 +379,7 @@ internal sealed unsafe class X265CuData
 
     private static uint R2Z(int r) => (uint)X265Tables.RasterToZscanPtr[r];
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
     public X265CuData? GetPULeft(out uint lPartUnitIdx, uint curPartUnitIdx)
     {
         int absPartIdx = Z2R(curPartUnitIdx);
@@ -399,6 +400,7 @@ internal sealed unsafe class X265CuData
         return m_cuLeft;
     }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
     public X265CuData? GetPUAbove(out uint aPartUnitIdx, uint curPartUnitIdx)
     {
         int absPartIdx = Z2R(curPartUnitIdx);
@@ -419,6 +421,7 @@ internal sealed unsafe class X265CuData
         return m_cuAbove;
     }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
     public X265CuData? GetPUAboveLeft(out uint alPartUnitIdx, uint curPartUnitIdx)
     {
         int absPartIdx = Z2R(curPartUnitIdx);
@@ -451,6 +454,7 @@ internal sealed unsafe class X265CuData
         return m_cuAboveLeft;
     }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
     public X265CuData? GetPUBelowLeftAdi(out uint blPartUnitIdx, uint curPartUnitIdx, uint partUnitOffset)
     {
         blPartUnitIdx = 0;
@@ -487,6 +491,7 @@ internal sealed unsafe class X265CuData
         return null;
     }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
     public X265CuData? GetPUAboveRightAdi(out uint arPartUnitIdx, uint curPartUnitIdx, uint partUnitOffset)
     {
         arPartUnitIdx = 0;

@@ -112,6 +112,7 @@ internal sealed unsafe class X265Quant
 
     // ---- significance contexts (static, shared with Entropy) ----
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static uint CalcPatternSigCtx(ulong sigCoeffGroupFlag64, uint cgPosX, uint cgPosY, uint cgBlkPos, uint trSizeCG)
     {
         if (trSizeCG == 1)
@@ -125,6 +126,7 @@ internal sealed unsafe class X265Quant
         return sigRight + (sigLower * 2);
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static uint GetSigCoeffGroupCtxInc(ulong cgGroupMask, uint cgPosX, uint cgPosY, uint cgBlkPos, uint trSizeCG)
     {
         uint sigPos = (uint)(cgGroupMask >> (int)(cgBlkPos + 1));
@@ -402,6 +404,7 @@ internal sealed unsafe class X265Quant
 
     private static int FastMin(int x, int y) => y + ((x - y) & ((x - y) >> 31));
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int GetICRate(uint absLevel, int diffLevel, int* greaterOneBits, int* levelAbsBits, uint absGoRice, uint maxVlc, uint c1c2Rate)
     {
         if (absLevel == 0)
@@ -440,6 +443,7 @@ internal sealed unsafe class X265Quant
         return rate;
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int GetICRateLessVlc(uint absLevel, int diffLevel, uint absGoRice)
     {
         if (absLevel == 0)
@@ -453,6 +457,7 @@ internal sealed unsafe class X265Quant
         return (int)(numBins << 15);
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static uint GetICRateCost(uint absLevel, int diffLevel, int* greaterOneBits, int* levelAbsBits, uint absGoRice, uint c1c2Rate)
     {
         if (diffLevel < 0)
@@ -501,6 +506,7 @@ internal sealed unsafe class X265Quant
         public long uncodedDist;
         public long sigCost;
         public long sigCost0;
+        public bool nonZero;
     }
 
     /// <summary>Rate-distortion optimized quantization (Quant::rdoQuant&lt;log2TrSize&gt;).</summary>
@@ -636,181 +642,18 @@ internal sealed unsafe class X265Quant
                 }
 
                 CoeffGroupRDStats cgRdStats = default;
-                uint subFlagMask = coeffFlag[cgScanPos];
-                int c2 = 0;
-                uint goRiceParam = 0;
-                uint levelThreshold = 3;
-                uint c1Idx = 0;
-                uint c2Idx = 0;
                 ulong ctxCnt = k.trSize == 4 ? 0x8877886654325410UL : TableCnt64[patternSigCtx];
                 uint scanPosBase = (uint)cgScanPos << MLS_CG_SIZE;
-
-                for (int scanPosinCG = (int)cgSize - 1; scanPosinCG >= 0; scanPosinCG--)
+                var totals = new RdoqTotals { uncoded = totalUncodedCost, rd = totalRdCost };
+                c1 = CodedGroup(&k, &totals, &cgRdStats, scanPosBase, coeffFlag[cgScanPos], ctxSet, ctxCnt, ctxSigOffset, signHide);
+                totalUncodedCost = totals.uncoded;
+                totalRdCost = totals.rd;
+                if (cgRdStats.nonZero)
                 {
-                    scanPos = scanPosBase + (uint)scanPosinCG;
-                    uint blkPos = k.scan[scanPos];
-                    uint maxAbsLevel = (uint)k.dstCoeff[blkPos];
-                    int signCoef = k.resiDct[blkPos];
-                    int predictedCoef = k.fencDct[blkPos] - signCoef;
-
-                    // cost of not coding this coefficient (all distortion, no signal bits)
-                    long uncoded = ((long)signCoef * signCoef) << k.scaleBits;
-                    if ((k.usePsyMask & scanPos) != 0)
-                    {
-                        uncoded -= PsyValue(k.psyScale, k.psyShift, predictedCoef);
-                    }
-
-                    k.costUncoded[blkPos] = uncoded;
-                    totalUncodedCost += uncoded;
-
-                    int* greaterOneBits = k.est->greaterOneBits + ((4 * ctxSet + c1) * 2);
-                    uint ctxSig = blkPos == 0 ? 0 : (uint)(((ctxCnt >> (4 * k.scan4[scanPosinCG])) & 0xF) + (ulong)ctxSigOffset);
-
-                    if (scanPos > (uint)k.lastScanPos)
-                    {
-                        k.costCoeff[scanPos] = 0;
-                        k.costSig[scanPos] = 0;
-                        totalRdCost += uncoded;
-                    }
-                    else if ((subFlagMask & 1) == 0)
-                    {
-                        // fast zero coeff path
-                        long sigCost = SigCost(k.lambda2, k.sigBits0[ctxSig]);
-                        k.costSig[scanPos] = sigCost;
-                        k.costCoeff[scanPos] = uncoded + sigCost;
-                        k.sigRateDelta[blkPos] = k.sigBits1[ctxSig] - k.sigBits0[ctxSig];
-                        totalRdCost += uncoded + sigCost;
-                        k.rateIncUp[blkPos] = greaterOneBits[0];
-                        subFlagMask >>= 1;
-                    }
-                    else
-                    {
-                        subFlagMask >>= 1;
-                        uint c1c2idx = ((c1Idx - 8) >> 31) + (uint)((((-(int)c2Idx) >> 31) + 1) * 2);
-                        uint baseLevel = (0xD9u >> (int)(c1c2idx * 2)) & 3;   // {1, 2, 1, 3}
-                        int* levelAbsBits = k.est->levelAbsBits + ((ctxSet + c2) * 2);
-                        uint c1c2Rate = ((c1c2idx & 1) != 0 ? (uint)greaterOneBits[1] : 0) + (c1c2idx == 3 ? (uint)levelAbsBits[1] : 0);
-
-                        uint level = 0;
-                        uint sigCoefBits = 0;
-                        long best = long.MaxValue;
-                        long bestSig = 0;
-
-                        if ((int)scanPos == k.lastScanPos)
-                        {
-                            k.sigRateDelta[blkPos] = 0;
-                        }
-                        else
-                        {
-                            if (maxAbsLevel < 3)
-                            {
-                                bestSig = SigCost(k.lambda2, k.sigBits0[ctxSig]);
-                                best = uncoded + bestSig;
-                            }
-
-                            k.sigRateDelta[blkPos] = k.sigBits1[ctxSig] - k.sigBits0[ctxSig];
-                            sigCoefBits = (uint)k.sigBits1[ctxSig];
-                        }
-
-                        int unquantStep = k.unquantScale[blkPos] << k.per;
-                        uint unQuantLevel = (uint)((maxAbsLevel * (uint)unquantStep) + k.unquantRound);
-                        int absSignCoef = Math.Abs(signCoef);
-                        if (maxAbsLevel == 1)
-                        {
-                            uint levelBits = (c1c2idx & 1) != 0 ? (uint)greaterOneBits[0] + IEP_RATE : ((1 + goRiceParam) << 15) + IEP_RATE;
-                            int unquantAbsLevel = (int)(unQuantLevel >> k.unquantShift);
-                            long curCost = RdCost(k.lambda2, k.scaleBits, absSignCoef - unquantAbsLevel, sigCoefBits + levelBits);
-                            if ((k.usePsyMask & scanPos) != 0)
-                            {
-                                int reconCoef = Math.Abs(unquantAbsLevel + ((predictedCoef ^ (signCoef >> 31)) - (signCoef >> 31)));
-                                curCost -= PsyValue(k.psyScale, k.psyShift, reconCoef);
-                            }
-
-                            if (curCost < best)
-                            {
-                                level = 1;
-                                best = curCost;
-                                bestSig = SigCost(k.lambda2, sigCoefBits);
-                            }
-                        }
-                        else if (maxAbsLevel != 0)
-                        {
-                            uint levelBits0 = GetICRateCost(maxAbsLevel, (int)(maxAbsLevel - baseLevel), greaterOneBits, levelAbsBits, goRiceParam, c1c2Rate) + IEP_RATE;
-                            uint levelBits1 = GetICRateCost(maxAbsLevel - 1, (int)(maxAbsLevel - 1 - baseLevel), greaterOneBits, levelAbsBits, goRiceParam, c1c2Rate) + IEP_RATE;
-                            int unquantAbsLevel0 = (int)(unQuantLevel >> k.unquantShift);
-                            long curCost0 = RdCost(k.lambda2, k.scaleBits, absSignCoef - unquantAbsLevel0, sigCoefBits + levelBits0);
-                            int unquantAbsLevel1 = (int)((unQuantLevel - (uint)unquantStep) >> k.unquantShift);
-                            long curCost1 = RdCost(k.lambda2, k.scaleBits, absSignCoef - unquantAbsLevel1, sigCoefBits + levelBits1);
-                            if ((k.usePsyMask & scanPos) != 0)
-                            {
-                                int sgn = (predictedCoef ^ (signCoef >> 31)) - (signCoef >> 31);
-                                curCost0 -= PsyValue(k.psyScale, k.psyShift, Math.Abs(unquantAbsLevel0 + sgn));
-                                curCost1 -= PsyValue(k.psyScale, k.psyShift, Math.Abs(unquantAbsLevel1 + sgn));
-                            }
-
-                            if (curCost0 < best)
-                            {
-                                level = maxAbsLevel;
-                                best = curCost0;
-                                bestSig = SigCost(k.lambda2, sigCoefBits);
-                            }
-
-                            if (curCost1 < best)
-                            {
-                                level = maxAbsLevel - 1;
-                                best = curCost1;
-                                bestSig = SigCost(k.lambda2, sigCoefBits);
-                            }
-                        }
-
-                        k.costCoeff[scanPos] = best;
-                        k.costSig[scanPos] = bestSig;
-
-                        k.dstCoeff[blkPos] = (short)level;
-                        totalRdCost += best;
-
-                        // costs for the sign hiding performed at the end
-                        if (signHide && level != 0)
-                        {
-                            SignHideRates(&k, blkPos, level, baseLevel, goRiceParam, greaterOneBits, levelAbsBits, c1c2Rate);
-                        }
-                        else
-                        {
-                            k.rateIncUp[blkPos] = greaterOneBits[0];
-                            k.rateIncDown[blkPos] = 0;
-                        }
-
-                        // update CABAC estimation state
-                        if (level >= baseLevel && goRiceParam < 4 && level > levelThreshold)
-                        {
-                            goRiceParam++;
-                            levelThreshold <<= 1;
-                        }
-
-                        uint isNonZero = (uint)(-(int)level) >> 31;
-                        c1Idx += isNonZero;
-                        if (level > 1)
-                        {
-                            c1 = 0;
-                            c2 += (int)((uint)(c2 - 2) >> 31);
-                            c2Idx++;
-                        }
-                        else if ((c1 == 1 || c1 == 2) && isNonZero != 0)
-                        {
-                            c1++;
-                        }
-
-                        if (level != 0)
-                        {
-                            sigCoeffGroupFlag64 |= cgBlkPosMask;
-                            cgRdStats.codedLevelAndDist += best - k.costSig[scanPos];
-                            cgRdStats.uncodedDist += uncoded;
-                            cgRdStats.nnzBeforePos0 += scanPosinCG;
-                        }
-                    }
-
-                    cgRdStats.sigCost += k.costSig[scanPos];
+                    sigCoeffGroupFlag64 |= cgBlkPosMask;
                 }
+
+                scanPos = scanPosBase;
 
                 cgRdStats.sigCost0 = k.costSig[scanPos];
                 costCoeffGroupSig[cgScanPos] = 0;
@@ -904,6 +747,196 @@ internal sealed unsafe class X265Quant
         return numSig;
     }
 
+    private struct RdoqTotals
+    {
+        public long uncoded, rd;
+    }
+
+    // the coefficients of one coded group (from its last scan position down): levels, the per-position costs, the
+    // group's RD statistics; returns c1 (whether a level > 1 was coded: 0)
+    private static uint CodedGroup(RdoqBlock* k, RdoqTotals* totals, CoeffGroupRDStats* cgRdStats, uint scanPosBase, uint subFlagMask, uint ctxSet, ulong ctxCnt, int ctxSigOffset, bool signHide)
+    {
+        const uint cgSize = 1 << MLS_CG_SIZE;
+        long totalUncoded = totals->uncoded, totalRd = totals->rd;
+        uint c1 = 1;
+        int c2 = 0;
+        uint goRiceParam = 0;
+        uint levelThreshold = 3;
+        uint c1Idx = 0;
+        uint c2Idx = 0;
+
+        for (int scanPosinCG = (int)cgSize - 1; scanPosinCG >= 0; scanPosinCG--)
+        {
+            uint scanPos = scanPosBase + (uint)scanPosinCG;
+            uint blkPos = k->scan[scanPos];
+            uint maxAbsLevel = (uint)k->dstCoeff[blkPos];
+            int signCoef = k->resiDct[blkPos];
+            int predictedCoef = k->fencDct[blkPos] - signCoef;
+
+            // cost of not coding this coefficient (all distortion, no signal bits)
+            long uncoded = ((long)signCoef * signCoef) << k->scaleBits;
+            if ((k->usePsyMask & scanPos) != 0)
+            {
+                uncoded -= PsyValue(k->psyScale, k->psyShift, predictedCoef);
+            }
+
+            k->costUncoded[blkPos] = uncoded;
+            totalUncoded += uncoded;
+
+            int* greaterOneBits = k->est->greaterOneBits + ((4 * ctxSet + c1) * 2);
+            uint ctxSig = blkPos == 0 ? 0 : (uint)(((ctxCnt >> (4 * k->scan4[scanPosinCG])) & 0xF) + (ulong)ctxSigOffset);
+
+            if (scanPos > (uint)k->lastScanPos)
+            {
+                k->costCoeff[scanPos] = 0;
+                k->costSig[scanPos] = 0;
+                totalRd += uncoded;
+            }
+            else if ((subFlagMask & 1) == 0)
+            {
+                // fast zero coeff path
+                long sigCost = SigCost(k->lambda2, k->sigBits0[ctxSig]);
+                k->costSig[scanPos] = sigCost;
+                k->costCoeff[scanPos] = uncoded + sigCost;
+                k->sigRateDelta[blkPos] = k->sigBits1[ctxSig] - k->sigBits0[ctxSig];
+                totalRd += uncoded + sigCost;
+                k->rateIncUp[blkPos] = greaterOneBits[0];
+                subFlagMask >>= 1;
+            }
+            else
+            {
+                subFlagMask >>= 1;
+                uint c1c2idx = ((c1Idx - 8) >> 31) + (uint)((((-(int)c2Idx) >> 31) + 1) * 2);
+                uint baseLevel = (0xD9u >> (int)(c1c2idx * 2)) & 3;   // {1, 2, 1, 3}
+                int* levelAbsBits = k->est->levelAbsBits + ((ctxSet + c2) * 2);
+                uint c1c2Rate = ((c1c2idx & 1) != 0 ? (uint)greaterOneBits[1] : 0) + (c1c2idx == 3 ? (uint)levelAbsBits[1] : 0);
+
+                uint level = 0;
+                uint sigCoefBits = 0;
+                long best = long.MaxValue;
+                long bestSig = 0;
+
+                if ((int)scanPos == k->lastScanPos)
+                {
+                    k->sigRateDelta[blkPos] = 0;
+                }
+                else
+                {
+                    if (maxAbsLevel < 3)
+                    {
+                        bestSig = SigCost(k->lambda2, k->sigBits0[ctxSig]);
+                        best = uncoded + bestSig;
+                    }
+
+                    k->sigRateDelta[blkPos] = k->sigBits1[ctxSig] - k->sigBits0[ctxSig];
+                    sigCoefBits = (uint)k->sigBits1[ctxSig];
+                }
+
+                int unquantStep = k->unquantScale[blkPos] << k->per;
+                uint unQuantLevel = (uint)((maxAbsLevel * (uint)unquantStep) + k->unquantRound);
+                int absSignCoef = Math.Abs(signCoef);
+                if (maxAbsLevel == 1)
+                {
+                    uint levelBits = (c1c2idx & 1) != 0 ? (uint)greaterOneBits[0] + IEP_RATE : ((1 + goRiceParam) << 15) + IEP_RATE;
+                    int unquantAbsLevel = (int)(unQuantLevel >> k->unquantShift);
+                    long curCost = RdCost(k->lambda2, k->scaleBits, absSignCoef - unquantAbsLevel, sigCoefBits + levelBits);
+                    if ((k->usePsyMask & scanPos) != 0)
+                    {
+                        int reconCoef = Math.Abs(unquantAbsLevel + ((predictedCoef ^ (signCoef >> 31)) - (signCoef >> 31)));
+                        curCost -= PsyValue(k->psyScale, k->psyShift, reconCoef);
+                    }
+
+                    if (curCost < best)
+                    {
+                        level = 1;
+                        best = curCost;
+                        bestSig = SigCost(k->lambda2, sigCoefBits);
+                    }
+                }
+                else if (maxAbsLevel != 0)
+                {
+                    uint levelBits0 = GetICRateCost(maxAbsLevel, (int)(maxAbsLevel - baseLevel), greaterOneBits, levelAbsBits, goRiceParam, c1c2Rate) + IEP_RATE;
+                    uint levelBits1 = GetICRateCost(maxAbsLevel - 1, (int)(maxAbsLevel - 1 - baseLevel), greaterOneBits, levelAbsBits, goRiceParam, c1c2Rate) + IEP_RATE;
+                    int unquantAbsLevel0 = (int)(unQuantLevel >> k->unquantShift);
+                    long curCost0 = RdCost(k->lambda2, k->scaleBits, absSignCoef - unquantAbsLevel0, sigCoefBits + levelBits0);
+                    int unquantAbsLevel1 = (int)((unQuantLevel - (uint)unquantStep) >> k->unquantShift);
+                    long curCost1 = RdCost(k->lambda2, k->scaleBits, absSignCoef - unquantAbsLevel1, sigCoefBits + levelBits1);
+                    if ((k->usePsyMask & scanPos) != 0)
+                    {
+                        int sgn = (predictedCoef ^ (signCoef >> 31)) - (signCoef >> 31);
+                        curCost0 -= PsyValue(k->psyScale, k->psyShift, Math.Abs(unquantAbsLevel0 + sgn));
+                        curCost1 -= PsyValue(k->psyScale, k->psyShift, Math.Abs(unquantAbsLevel1 + sgn));
+                    }
+
+                    if (curCost0 < best)
+                    {
+                        level = maxAbsLevel;
+                        best = curCost0;
+                        bestSig = SigCost(k->lambda2, sigCoefBits);
+                    }
+
+                    if (curCost1 < best)
+                    {
+                        level = maxAbsLevel - 1;
+                        best = curCost1;
+                        bestSig = SigCost(k->lambda2, sigCoefBits);
+                    }
+                }
+
+                k->costCoeff[scanPos] = best;
+                k->costSig[scanPos] = bestSig;
+
+                k->dstCoeff[blkPos] = (short)level;
+                totalRd += best;
+
+                // costs for the sign hiding performed at the end
+                if (signHide && level != 0)
+                {
+                    SignHideRates(k, blkPos, level, baseLevel, goRiceParam, greaterOneBits, levelAbsBits, c1c2Rate);
+                }
+                else
+                {
+                    k->rateIncUp[blkPos] = greaterOneBits[0];
+                    k->rateIncDown[blkPos] = 0;
+                }
+
+                // update CABAC estimation state
+                if (level >= baseLevel && goRiceParam < 4 && level > levelThreshold)
+                {
+                    goRiceParam++;
+                    levelThreshold <<= 1;
+                }
+
+                uint isNonZero = (uint)(-(int)level) >> 31;
+                c1Idx += isNonZero;
+                if (level > 1)
+                {
+                    c1 = 0;
+                    c2 += (int)((uint)(c2 - 2) >> 31);
+                    c2Idx++;
+                }
+                else if ((c1 == 1 || c1 == 2) && isNonZero != 0)
+                {
+                    c1++;
+                }
+
+                if (level != 0)
+                {
+                    cgRdStats->nonZero = true;
+                    cgRdStats->codedLevelAndDist += best - k->costSig[scanPos];
+                    cgRdStats->uncodedDist += uncoded;
+                    cgRdStats->nnzBeforePos0 += scanPosinCG;
+                }
+            }
+
+            cgRdStats->sigCost += k->costSig[scanPos];
+        }
+
+        totals->uncoded = totalUncoded;
+        totals->rd = totalRd;
+        return c1;
+    }
+
     // the uncoded cost of a 4x4 group without coefficients (psyRdoQuant_1p / 2p or nonPsyRdoQuant), costUncoded filled
     private static long UncodedGroupCost(RdoqBlock* k, uint blkPos)
     {
@@ -939,6 +972,7 @@ internal sealed unsafe class X265Quant
     }
 
     // rateIncUp / rateIncDown of a coded level for the sign hiding
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void SignHideRates(RdoqBlock* k, uint blkPos, uint level, uint baseLevel, uint goRiceParam, int* greaterOneBits, int* levelAbsBits, uint c1c2Rate)
     {
         int diff0 = (int)level - 1 - (int)baseLevel;

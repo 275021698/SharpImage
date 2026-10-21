@@ -124,6 +124,14 @@ public sealed class X265PrimitivesTests
             X265.X265Primitives.AllAngsPred(log2, a, refPix, filtPix, bLuma);
             X265.X265Primitives.AllAngsPredScalar(log2, b, refPix, filtPix, bLuma);
             for (int i = 0; i < 33 * size * size; i++) if (a[i] != b[i]) bad++;
+
+            // single modes into a strided block
+            for (int mode = 2; mode <= 34; mode++)
+            {
+                X265.X265Primitives.IntraPredAng(size, a, 40, refPix, mode, bLuma);
+                X265.X265Primitives.IntraPredAngScalar(size, b, 40, refPix, mode, bLuma);
+                for (int y = 0; y < size; y++) for (int x = 0; x < size; x++) if (a[(y * 40) + x] != b[(y * 40) + x]) bad++;
+            }
         }
 
         return bad;

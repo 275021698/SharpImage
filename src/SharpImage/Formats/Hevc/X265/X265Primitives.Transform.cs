@@ -212,6 +212,7 @@ internal static unsafe partial class X265Primitives
     private static void Forward4(TransformTables t, short* src, long srcStride, short* dst, int shift1, int shift2)
     {
         var add1 = Vector128.Create(1 << (shift1 - 1));
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         static Vector128<int> RowPass(short* row, TransformTables tt)
         {
             var x = Vector128.CreateScalar(*(long*)row).AsInt32();

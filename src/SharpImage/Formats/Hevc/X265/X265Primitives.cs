@@ -190,6 +190,11 @@ internal static unsafe partial class X265Primitives
     public static int PsyCostPP(int sizeIdx, pixel* source, long sstride, pixel* recon, long rstride)
     {
 #if !HIGH_BIT_DEPTH
+        if (sizeIdx == 0 && System.Runtime.Intrinsics.X86.Ssse3.IsSupported)
+        {
+            return Math.Abs(PsyEnergy4x4(source, sstride) - PsyEnergy4x4(recon, rstride));
+        }
+
         if (sizeIdx != 0 && System.Runtime.Intrinsics.X86.Ssse3.IsSupported)
         {
             int dim8 = 1 << (sizeIdx + 2);
@@ -999,19 +1004,36 @@ internal static unsafe partial class X265Primitives
         return (absSumSign << 31) | (lastNZPosInCG << 8) | firstNZPosInCG;
     }
 
+    private struct CoeffAbs16
+    {
+        public fixed ushort v[16];
+    }
+
     public static uint CostCoeffNxN(ushort* scan, short* coeff, long trSize, ushort* absCoeff, byte* tabSigCtx, uint scanFlagMask,
         byte* baseCtx, int offset, int scanPosSigOff, int subPosBase)
     {
-        ushort* tmpCoeff = stackalloc ushort[SCAN_SET_SIZE];
+        CoeffAbs16 tmp;
+        ushort* tmpCoeff = tmp.v;
         uint numNonZero = scanPosSigOff < SCAN_SET_SIZE - 1 ? 1u : 0u;
         uint sum = 0;
         absCoeff -= numNonZero;   // correct offset to match assembly
-        for (int i = 0; i < MLS_CG_SIZE; i++)
+        if (System.Runtime.Intrinsics.X86.Ssse3.IsSupported)
         {
-            tmpCoeff[(i * MLS_CG_SIZE) + 0] = (ushort)Math.Abs((int)coeff[(i * trSize) + 0]);
-            tmpCoeff[(i * MLS_CG_SIZE) + 1] = (ushort)Math.Abs((int)coeff[(i * trSize) + 1]);
-            tmpCoeff[(i * MLS_CG_SIZE) + 2] = (ushort)Math.Abs((int)coeff[(i * trSize) + 2]);
-            tmpCoeff[(i * MLS_CG_SIZE) + 3] = (ushort)Math.Abs((int)coeff[(i * trSize) + 3]);
+            // |level| as int16 (|-32768| stays 0x8000: the same 16 bits as the scalar (ushort) cast)
+            var r01 = System.Runtime.Intrinsics.Vector128.AsInt16(System.Runtime.Intrinsics.Vector128.Create(*(long*)coeff, *(long*)(coeff + trSize)));
+            var r23 = System.Runtime.Intrinsics.Vector128.AsInt16(System.Runtime.Intrinsics.Vector128.Create(*(long*)(coeff + (2 * trSize)), *(long*)(coeff + (3 * trSize))));
+            System.Runtime.Intrinsics.X86.Sse2.Store(tmpCoeff, System.Runtime.Intrinsics.X86.Ssse3.Abs(r01));
+            System.Runtime.Intrinsics.X86.Sse2.Store(tmpCoeff + 8, System.Runtime.Intrinsics.X86.Ssse3.Abs(r23));
+        }
+        else
+        {
+            for (int i = 0; i < MLS_CG_SIZE; i++)
+            {
+                tmpCoeff[(i * MLS_CG_SIZE) + 0] = (ushort)Math.Abs((int)coeff[(i * trSize) + 0]);
+                tmpCoeff[(i * MLS_CG_SIZE) + 1] = (ushort)Math.Abs((int)coeff[(i * trSize) + 1]);
+                tmpCoeff[(i * MLS_CG_SIZE) + 2] = (ushort)Math.Abs((int)coeff[(i * trSize) + 2]);
+                tmpCoeff[(i * MLS_CG_SIZE) + 3] = (ushort)Math.Abs((int)coeff[(i * trSize) + 3]);
+            }
         }
 
         do
@@ -1225,6 +1247,18 @@ internal static unsafe partial class X265Primitives
     private static readonly short[] InvAngleTable = { 4096, 1638, 910, 630, 482, 390, 315, 256 };
 
     public static void IntraPredAng(int width, pixel* dst, long dstStride, pixel* srcPix0, int dirMode, int bFilter)
+    {
+#if !HIGH_BIT_DEPTH
+        if (System.Runtime.Intrinsics.X86.Ssse3.IsSupported)
+        {
+            IntraPredAng8(width, dst, dstStride, srcPix0, dirMode, bFilter);
+            return;
+        }
+#endif
+        IntraPredAng(width, dst, dstStride, srcPix0, dirMode, bFilter, transposeHorizontal: true);
+    }
+
+    internal static void IntraPredAngScalar(int width, pixel* dst, long dstStride, pixel* srcPix0, int dirMode, int bFilter)
         => IntraPredAng(width, dst, dstStride, srcPix0, dirMode, bFilter, transposeHorizontal: true);
 
     // transposeHorizontal false: a horizontal mode's prediction is left transposed (what all_angs_pred stores)

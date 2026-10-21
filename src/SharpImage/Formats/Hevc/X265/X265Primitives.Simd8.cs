@@ -270,5 +270,45 @@ internal static unsafe partial class X265Primitives
             for (int x = 0; x < n; x += 8) Sse2.Store(dst + x, Widen8(src + x));
         }
     }
+    // 4 pixels of two rows as int16 ([row a | row b])
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector128<short> Rows4x2(byte* p, long stride) =>
+        Sse2.UnpackLow(Vector128.Create(*(uint*)p, *(uint*)(p + stride), 0, 0).AsByte(), Vector128<byte>.Zero).AsInt16();
+
+    // satd_4x4 of 8-bit pixels: the vertical Hadamard in int16, the horizontal one by pmaddwd / phaddd / phsubd
+    private static int Satd4x4x8(byte* pix1, long stride1, byte* pix2, long stride2)
+    {
+        var d01 = Sse2.Subtract(Rows4x2(pix1, stride1), Rows4x2(pix2, stride2));
+        var d23 = Sse2.Subtract(Rows4x2(pix1 + (2 * stride1), stride1), Rows4x2(pix2 + (2 * stride2), stride2));
+        var s = Sse2.Add(d01, d23);
+        var d = Sse2.Subtract(d01, d23);
+        var t0 = Sse2.UnpackLow(s.AsInt64(), d.AsInt64()).AsInt16();
+        var t1 = Sse2.UnpackHigh(s.AsInt64(), d.AsInt64()).AsInt16();
+        return (HorizontalH4Abs(Sse2.Add(t0, t1)) + HorizontalH4Abs(Sse2.Subtract(t0, t1))) >> 1;
+    }
+
+    // sum of |4-point Hadamard| of each 4-sample group of v (two groups)
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int HorizontalH4Abs(Vector128<short> v)
+    {
+        var pa = Sse2.MultiplyAddAdjacent(v, Vector128.Create((short)1));
+        var pb = Sse2.MultiplyAddAdjacent(v, Vector128.Create((short)1, -1, 1, -1, 1, -1, 1, -1));
+        var sum = Sse2.Add(Ssse3.Abs(Ssse3.HorizontalAdd(pa, pb)).AsInt32(), Ssse3.Abs(Ssse3.HorizontalSubtract(pa, pb)).AsInt32());
+        return Vector128.Sum(sum);
+    }
+
+    // psy energy of a 4x4 block: satd against zero minus a quarter of the pixel sum
+    private static int PsyEnergy4x4(byte* p, long stride)
+    {
+        var r01 = Rows4x2(p, stride);
+        var r23 = Rows4x2(p + (2 * stride), stride);
+        int sad = Vector128.Sum(Sse2.MultiplyAddAdjacent(Sse2.Add(r01, r23), Vector128.Create((short)1)));
+        var s = Sse2.Add(r01, r23);
+        var d = Sse2.Subtract(r01, r23);
+        var t0 = Sse2.UnpackLow(s.AsInt64(), d.AsInt64()).AsInt16();
+        var t1 = Sse2.UnpackHigh(s.AsInt64(), d.AsInt64()).AsInt16();
+        int satd = (HorizontalH4Abs(Sse2.Add(t0, t1)) + HorizontalH4Abs(Sse2.Subtract(t0, t1))) >> 1;
+        return satd - (sad >> 2);
+    }
 #endif
 }
