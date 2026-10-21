@@ -784,7 +784,7 @@ internal sealed unsafe class X265Quant
                         {
                             int diff0 = (int)level - 1 - (int)baseLevel;
                             int diff2 = (int)level + 1 - (int)baseLevel;
-                            int maxVlc = X265Tables.GoRiceRange[goRiceParam];
+                            int maxVlc = X265Tables.GoRiceRangePtr[goRiceParam];
                             int rate0, rate1, rate2;
                             if (diff0 < -2)
                             {
@@ -940,7 +940,7 @@ internal sealed unsafe class X265Quant
                         uint bitsLastNZ = 0;
                         for (int i = 0; i < 2; i++)
                         {
-                            int temp = X265Tables.LastCoeffTable[i == 0 ? pos0 : pos1];
+                            int temp = X265Tables.LastCoeffTablePtr[i == 0 ? pos0 : pos1];
                             int prefixOnes = temp & 15;
                             int suffixLen = temp >> 4;
                             bitsLastNZ += (uint)est->lastBits[(i * 10) + prefixOnes];

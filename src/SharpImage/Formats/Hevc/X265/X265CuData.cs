@@ -209,8 +209,8 @@ internal sealed unsafe class X265CuData
         m_encData = ctu.m_encData;
         m_slice = ctu.m_slice;
         m_cuAddr = ctu.m_cuAddr;
-        m_cuPelX = ctu.m_cuPelX + X265Tables.ZscanToPelX[cuGeom.absPartIdx];
-        m_cuPelY = ctu.m_cuPelY + X265Tables.ZscanToPelY[cuGeom.absPartIdx];
+        m_cuPelX = ctu.m_cuPelX + X265Tables.ZscanToPelXPtr[cuGeom.absPartIdx];
+        m_cuPelY = ctu.m_cuPelY + X265Tables.ZscanToPelYPtr[cuGeom.absPartIdx];
         m_cuLeft = ctu.m_cuLeft;
         m_cuAbove = ctu.m_cuAbove;
         m_cuAboveLeft = ctu.m_cuAboveLeft;
@@ -375,9 +375,9 @@ internal sealed unsafe class X265CuData
 
     private static bool LessThanRow(int addr, int val) => (addr >> LOG2_RASTER_SIZE) < val;
 
-    private static int Z2R(uint z) => X265Tables.ZscanToRaster[z];
+    private static int Z2R(uint z) => X265Tables.ZscanToRasterPtr[z];
 
-    private static uint R2Z(int r) => (uint)X265Tables.RasterToZscan[r];
+    private static uint R2Z(int r) => (uint)X265Tables.RasterToZscanPtr[r];
 
     public X265CuData? GetPULeft(out uint lPartUnitIdx, uint curPartUnitIdx)
     {
@@ -454,7 +454,7 @@ internal sealed unsafe class X265CuData
     public X265CuData? GetPUBelowLeftAdi(out uint blPartUnitIdx, uint curPartUnitIdx, uint partUnitOffset)
     {
         blPartUnitIdx = 0;
-        if ((m_encData.GetPicCTU(m_cuAddr).m_cuPelY + X265Tables.ZscanToPelY[curPartUnitIdx] + (partUnitOffset << LOG2_UNIT_SIZE)) >= m_slice.m_sps.picHeightInLumaSamples)
+        if ((m_encData.GetPicCTU(m_cuAddr).m_cuPelY + X265Tables.ZscanToPelYPtr[curPartUnitIdx] + (partUnitOffset << LOG2_UNIT_SIZE)) >= m_slice.m_sps.picHeightInLumaSamples)
         {
             return null;
         }
@@ -490,7 +490,7 @@ internal sealed unsafe class X265CuData
     public X265CuData? GetPUAboveRightAdi(out uint arPartUnitIdx, uint curPartUnitIdx, uint partUnitOffset)
     {
         arPartUnitIdx = 0;
-        if ((m_encData.GetPicCTU(m_cuAddr).m_cuPelX + X265Tables.ZscanToPelX[curPartUnitIdx] + (partUnitOffset << LOG2_UNIT_SIZE)) >= m_slice.m_sps.picWidthInLumaSamples)
+        if ((m_encData.GetPicCTU(m_cuAddr).m_cuPelX + X265Tables.ZscanToPelXPtr[curPartUnitIdx] + (partUnitOffset << LOG2_UNIT_SIZE)) >= m_slice.m_sps.picWidthInLumaSamples)
         {
             return null;
         }
@@ -624,7 +624,7 @@ internal sealed unsafe class X265CuData
     {
         X265CuData? tempCU = GetPULeft(out uint tempPartIdx, m_absIdxInCTU + absPartIdx);
         uint leftIntraDir = (tempCU != null && tempCU.IsIntra(tempPartIdx)) ? tempCU.m_lumaIntraDir[tempPartIdx] : (uint)DC_IDX;
-        tempCU = X265Tables.ZscanToPelY[m_absIdxInCTU + absPartIdx] > 0 ? GetPUAbove(out tempPartIdx, m_absIdxInCTU + absPartIdx) : null;
+        tempCU = X265Tables.ZscanToPelYPtr[m_absIdxInCTU + absPartIdx] > 0 ? GetPUAbove(out tempPartIdx, m_absIdxInCTU + absPartIdx) : null;
         uint aboveIntraDir = (tempCU != null && tempCU.IsIntra(tempPartIdx)) ? tempCU.m_lumaIntraDir[tempPartIdx] : (uint)DC_IDX;
 
         if (leftIntraDir == aboveIntraDir)

@@ -900,23 +900,34 @@ internal static unsafe partial class X265Primitives
 
     public static int ScanPosLast(ushort* scan, short* coeff, ushort* coeffSign, ushort* coeffFlag, byte* coeffNum, int numSig)
     {
-        new Span<byte>(coeffNum, MLS_GRP_NUM).Clear();
-        new Span<ushort>(coeffFlag, MLS_GRP_NUM).Clear();
-        new Span<ushort>(coeffSign, MLS_GRP_NUM).Clear();
+        Unsafe.InitBlockUnaligned(coeffNum, 0, MLS_GRP_NUM);
+        Unsafe.InitBlockUnaligned(coeffFlag, 0, MLS_GRP_NUM * sizeof(ushort));
+        Unsafe.InitBlockUnaligned(coeffSign, 0, MLS_GRP_NUM * sizeof(ushort));
+        // x265's per-coefficient loop, each coefficient group's flag / sign / count kept in registers
         int scanPosLast = 0;
-        do
+        for (uint cgIdx = 0; ; cgIdx++)
         {
-            uint cgIdx = (uint)scanPosLast >> MLS_CG_SIZE;
-            uint posLast = scan[scanPosLast++];
-            int curCoeff = coeff[posLast];
-            uint isNZCoeff = curCoeff != 0 ? 1u : 0u;
-            numSig -= (int)isNZCoeff;
-            coeffSign[cgIdx] += (ushort)(((uint)curCoeff >> 31) << coeffNum[cgIdx]);
-            coeffFlag[cgIdx] = (ushort)((coeffFlag[cgIdx] << 1) + isNZCoeff);
-            coeffNum[cgIdx] += (byte)isNZCoeff;
+            uint flag = 0, sign = 0, num = 0;
+            int end = scanPosLast + SCAN_SET_SIZE;
+            do
+            {
+                int curCoeff = coeff[scan[scanPosLast++]];
+                uint isNZCoeff = curCoeff != 0 ? 1u : 0u;
+                numSig -= (int)isNZCoeff;
+                sign += ((uint)curCoeff >> 31) << (int)num;
+                flag = (flag << 1) + isNZCoeff;
+                num += isNZCoeff;
+            }
+            while (numSig > 0 && scanPosLast < end);
+
+            coeffSign[cgIdx] = (ushort)sign;
+            coeffFlag[cgIdx] = (ushort)flag;
+            coeffNum[cgIdx] = (byte)num;
+            if (numSig <= 0)
+            {
+                return scanPosLast - 1;
+            }
         }
-        while (numSig > 0);
-        return scanPosLast - 1;
     }
 
     public static uint FindPosFirstLast(short* dstCoeff, long trSize, ushort* scanTbl)
@@ -979,7 +990,7 @@ internal static unsafe partial class X265Primitives
                 uint ctxSig = cnt & posZeroMask;
                 uint mstate = baseCtx[ctxSig];
                 uint mps = mstate & 1;
-                uint stateBits = X265Tables.EntropyStateBits[mstate ^ sig];
+                uint stateBits = X265Tables.EntropyStateBitsPtr[mstate ^ sig];
                 uint nextState = (stateBits >> 24) + mps;
                 if ((mstate ^ sig) == 1)
                 {
@@ -1050,8 +1061,8 @@ internal static unsafe partial class X265Primitives
             uint symbol1 = absCoeff[idx] > 1 ? 1u : 0u;
             uint symbol2 = absCoeff[idx] > 2 ? 1u : 0u;
             uint mstate = baseCtxMod[c1];
-            baseCtxMod[c1] = X265Tables.NextState[(mstate * 2) + symbol1];
-            sum += X265Tables.EntropyBits[mstate ^ symbol1];
+            baseCtxMod[c1] = X265Tables.NextStatePtr[(mstate * 2) + symbol1];
+            sum += X265Tables.EntropyBitsPtr[mstate ^ symbol1];
             if (symbol1 != 0)
             {
                 c1Next = 0;
@@ -1077,8 +1088,8 @@ internal static unsafe partial class X265Primitives
         {
             baseCtxMod += ctxOffset;
             uint mstate = baseCtxMod[0];
-            baseCtxMod[0] = X265Tables.NextState[(mstate * 2) + firstC2Flag];
-            sum += X265Tables.EntropyBits[mstate ^ firstC2Flag];
+            baseCtxMod[0] = X265Tables.NextStatePtr[(mstate * 2) + firstC2Flag];
+            sum += X265Tables.EntropyBitsPtr[mstate ^ firstC2Flag];
         }
 
         return (sum & 0x00FFFFFF) + (c1 << 26) + (firstC2Idx << 28);

@@ -82,8 +82,8 @@ internal sealed unsafe class X265PicYuv
 
         for (int idx = 0; idx < numPartitions; ++idx)
         {
-            long x = X265Tables.ZscanToPelX[idx];
-            long y = X265Tables.ZscanToPelY[idx];
+            long x = X265Tables.ZscanToPelXPtr[idx];
+            long y = X265Tables.ZscanToPelYPtr[idx];
             m_buOffsetY[idx] = (m_stride * y) + x;
             if (m_picCsp != X265_CSP_I400)
             {
@@ -224,10 +224,10 @@ internal sealed unsafe class X265Yuv
         }
     }
 
-    public static int GetAddrOffset(uint absPartIdx, uint width) => X265Tables.ZscanToPelX[absPartIdx] + (X265Tables.ZscanToPelY[absPartIdx] * (int)width);
+    public static int GetAddrOffset(uint absPartIdx, uint width) => X265Tables.ZscanToPelXPtr[absPartIdx] + (X265Tables.ZscanToPelYPtr[absPartIdx] * (int)width);
 
     public int GetChromaAddrOffset(uint absPartIdx) =>
-        (X265Tables.ZscanToPelX[absPartIdx] >> m_hChromaShift) + ((X265Tables.ZscanToPelY[absPartIdx] >> m_vChromaShift) * (int)m_csize);
+        (X265Tables.ZscanToPelXPtr[absPartIdx] >> m_hChromaShift) + ((X265Tables.ZscanToPelYPtr[absPartIdx] >> m_vChromaShift) * (int)m_csize);
 
     public pixel* GetLumaAddr(uint absPartIdx) => m_buf[0] + GetAddrOffset(absPartIdx, m_size);
 
@@ -332,7 +332,7 @@ internal sealed unsafe class X265ShortYuv
     }
 
     public int GetChromaAddrOffset(uint idx) =>
-        (X265Tables.ZscanToPelX[idx] >> m_hChromaShift) + ((X265Tables.ZscanToPelY[idx] >> m_vChromaShift) * (int)m_csize);
+        (X265Tables.ZscanToPelXPtr[idx] >> m_hChromaShift) + ((X265Tables.ZscanToPelYPtr[idx] >> m_vChromaShift) * (int)m_csize);
 
     public short* GetLumaAddr(uint absPartIdx) => m_buf[0] + X265Yuv.GetAddrOffset(absPartIdx, m_size);
 

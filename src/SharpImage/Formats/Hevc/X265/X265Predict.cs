@@ -211,8 +211,8 @@ internal unsafe class X265Predict
         int aboveUnits = tuWidthInUnits << 1;
         int leftUnits = tuHeightInUnits << 1;
         uint partIdxLT = cu.m_absIdxInCTU + absPartIdx;
-        uint partIdxRT = (uint)X265Tables.RasterToZscan[X265Tables.ZscanToRaster[partIdxLT] + tuWidthInUnits - 1];
-        uint partIdxLB = (uint)X265Tables.RasterToZscan[X265Tables.ZscanToRaster[partIdxLT] + ((tuHeightInUnits - 1) << LOG2_RASTER_SIZE)];
+        uint partIdxRT = (uint)X265Tables.RasterToZscanPtr[X265Tables.ZscanToRasterPtr[partIdxLT] + tuWidthInUnits - 1];
+        uint partIdxLB = (uint)X265Tables.RasterToZscanPtr[X265Tables.ZscanToRasterPtr[partIdxLT] + ((tuHeightInUnits - 1) << LOG2_RASTER_SIZE)];
 
         // intra slices: no constrained intra prediction
         bNeighborFlags[leftUnits] = IsAboveLeftAvailable(cu, partIdxLT);
@@ -351,12 +351,12 @@ internal unsafe class X265Predict
 
     private static int IsAboveAvailable(X265CuData cu, uint partIdxLT, uint partIdxRT, bool* bValidFlags)
     {
-        int rasterPartBegin = X265Tables.ZscanToRaster[partIdxLT];
-        int rasterPartEnd = X265Tables.ZscanToRaster[partIdxRT];
+        int rasterPartBegin = X265Tables.ZscanToRasterPtr[partIdxLT];
+        int rasterPartEnd = X265Tables.ZscanToRasterPtr[partIdxRT];
         int numIntra = 0;
         for (int rasterPart = rasterPartBegin; rasterPart <= rasterPartEnd; rasterPart++, bValidFlags++)
         {
-            if (cu.GetPUAbove(out _, (uint)X265Tables.RasterToZscan[rasterPart]) != null)
+            if (cu.GetPUAbove(out _, (uint)X265Tables.RasterToZscanPtr[rasterPart]) != null)
             {
                 numIntra++;
                 *bValidFlags = true;
@@ -372,12 +372,12 @@ internal unsafe class X265Predict
 
     private static int IsLeftAvailable(X265CuData cu, uint partIdxLT, uint partIdxLB, bool* bValidFlags)
     {
-        int rasterPartBegin = X265Tables.ZscanToRaster[partIdxLT];
-        int rasterPartEnd = X265Tables.ZscanToRaster[partIdxLB];
+        int rasterPartBegin = X265Tables.ZscanToRasterPtr[partIdxLT];
+        int rasterPartEnd = X265Tables.ZscanToRasterPtr[partIdxLB];
         int numIntra = 0;
         for (int rasterPart = rasterPartBegin; rasterPart <= rasterPartEnd; rasterPart += RASTER_SIZE, bValidFlags--)
         {
-            if (cu.GetPULeft(out _, (uint)X265Tables.RasterToZscan[rasterPart]) != null)
+            if (cu.GetPULeft(out _, (uint)X265Tables.RasterToZscanPtr[rasterPart]) != null)
             {
                 numIntra++;
                 *bValidFlags = true;

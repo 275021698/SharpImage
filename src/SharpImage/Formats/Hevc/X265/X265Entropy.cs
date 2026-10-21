@@ -231,15 +231,15 @@ internal sealed unsafe partial class X265Entropy
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static uint SbacGetEntropyBits(uint state, uint bin) => X265Tables.EntropyBits[state ^ bin];
+    public static uint SbacGetEntropyBits(uint state, uint bin) => X265Tables.EntropyBitsPtr[state ^ bin];
 
     public void EncodeBin(uint binValue, byte* ctxModel)
     {
         uint mstate = *ctxModel;
-        *ctxModel = X265Tables.NextState[(mstate * 2) + binValue];
+        *ctxModel = X265Tables.NextStatePtr[(mstate * 2) + binValue];
         if (m_bitIf == null)
         {
-            m_fracBits += X265Tables.EntropyBits[mstate ^ binValue];
+            m_fracBits += X265Tables.EntropyBitsPtr[mstate ^ binValue];
             return;
         }
 
@@ -327,7 +327,7 @@ internal sealed unsafe partial class X265Entropy
     {
         if (m_bitIf == null)
         {
-            m_fracBits += X265Tables.EntropyBits[126 ^ binValue];
+            m_fracBits += X265Tables.EntropyBitsPtr[126 ^ binValue];
             return;
         }
 
@@ -390,7 +390,7 @@ internal sealed unsafe partial class X265Entropy
     /// <summary>The bits of a context-coded bin, without updating the context.</summary>
     public uint BitsCodeBin(uint binValue, uint ctxModel)
     {
-        ulong fracBits = (m_fracBits & 32767) + X265Tables.EntropyBits[ctxModel ^ binValue];
+        ulong fracBits = (m_fracBits & 32767) + X265Tables.EntropyBitsPtr[ctxModel ^ binValue];
         return (uint)(fracBits >> 15);
     }
 
@@ -497,8 +497,8 @@ internal sealed unsafe partial class X265Entropy
         uint cuAddr = ctu.GetSCUAddr() + absPartIdx;
         uint granularityMask = (uint)ctu.m_encData.m_param.maxCUSize - 1;
         uint cuSize = 1u << ctu.m_log2CUSize[absPartIdx];
-        uint rpelx = ctu.m_cuPelX + X265Tables.ZscanToPelX[absPartIdx] + cuSize;
-        uint bpely = ctu.m_cuPelY + X265Tables.ZscanToPelY[absPartIdx] + cuSize;
+        uint rpelx = ctu.m_cuPelX + X265Tables.ZscanToPelXPtr[absPartIdx] + cuSize;
+        uint bpely = ctu.m_cuPelY + X265Tables.ZscanToPelYPtr[absPartIdx] + cuSize;
         bool granularityBoundary = ((rpelx & granularityMask) == 0 || rpelx == slice.m_sps.picWidthInLumaSamples) &&
                                    ((bpely & granularityMask) == 0 || bpely == slice.m_sps.picHeightInLumaSamples);
 
@@ -960,7 +960,7 @@ internal sealed unsafe partial class X265Entropy
             for (uint i = 0; i < 2; i++, ctxIdx += NUM_CTX_LAST_FLAG_XY)
             {
                 uint pos = i == 0 ? pos0 : pos1;
-                uint temp = X265Tables.LastCoeffTable[pos];
+                uint temp = X265Tables.LastCoeffTablePtr[pos];
                 uint prefixOnes = temp & 15;
                 uint suffixLen = temp >> 4;
                 for (uint ctxLast = 0; ctxLast < prefixOnes; ctxLast++)

@@ -45,14 +45,14 @@ internal static unsafe class X265Deblock
     {
         if (dir == EDGE_VER)
         {
-            if (cu.m_cuPelX + X265Tables.ZscanToPelX[absPartIdx] > 0)
+            if (cu.m_cuPelX + X265Tables.ZscanToPelXPtr[absPartIdx] > 0)
             {
                 return cu.GetPULeft(out _, absPartIdx) != null ? (byte)2 : (byte)0;
             }
         }
         else
         {
-            if (cu.m_cuPelY + X265Tables.ZscanToPelY[absPartIdx] > 0)
+            if (cu.m_cuPelY + X265Tables.ZscanToPelYPtr[absPartIdx] > 0)
             {
                 return cu.GetPUAbove(out _, absPartIdx) != null ? (byte)2 : (byte)0;
             }
@@ -102,7 +102,7 @@ internal static unsafe class X265Deblock
         const uint partIdxIncr = DEBLOCK_SMALLEST_BLOCK >> LOG2_UNIT_SIZE;
         int shiftFactor = dir == EDGE_VER ? cu.m_hChromaShift : cu.m_vChromaShift;
         uint chromaMask = (uint)(((DEBLOCK_SMALLEST_BLOCK << shiftFactor) >> LOG2_UNIT_SIZE) - 1);
-        uint e0 = (uint)(dir == EDGE_VER ? X265Tables.ZscanToPelX[absPartIdx] : X265Tables.ZscanToPelY[absPartIdx]) >> LOG2_UNIT_SIZE;
+        uint e0 = (uint)(dir == EDGE_VER ? X265Tables.ZscanToPelXPtr[absPartIdx] : X265Tables.ZscanToPelYPtr[absPartIdx]) >> LOG2_UNIT_SIZE;
         for (uint e = 0; e < numUnits; e += partIdxIncr)
         {
             EdgeFilterLuma(cu, absPartIdx, depth, dir, (int)e, blockStrength);
@@ -117,10 +117,10 @@ internal static unsafe class X265Deblock
     {
         if (dir != 0)
         {
-            return (uint)X265Tables.RasterToZscan[X265Tables.ZscanToRaster[absPartIdx] + (edgeIdx << LOG2_RASTER_SIZE) + baseUnitIdx];
+            return (uint)X265Tables.RasterToZscanPtr[X265Tables.ZscanToRasterPtr[absPartIdx] + (edgeIdx << LOG2_RASTER_SIZE) + baseUnitIdx];
         }
 
-        return (uint)X265Tables.RasterToZscan[X265Tables.ZscanToRaster[absPartIdx] + (baseUnitIdx << LOG2_RASTER_SIZE) + edgeIdx];
+        return (uint)X265Tables.RasterToZscanPtr[X265Tables.ZscanToRasterPtr[absPartIdx] + (baseUnitIdx << LOG2_RASTER_SIZE) + edgeIdx];
     }
 
     private static void SetEdgefilterMultiple(uint scanIdx, int dir, int edgeIdx, byte value, byte* blockStrength, uint numUnits)

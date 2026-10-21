@@ -204,8 +204,8 @@ internal sealed unsafe class X265Analysis : X265Search
         {
             uint width = (uint)m_frame.m_fencPic.m_picWidth;
             uint height = (uint)m_frame.m_fencPic.m_picHeight;
-            uint blockX = ctu.m_cuPelX + X265Tables.ZscanToPelX[cuGeom->absPartIdx];
-            uint blockY = ctu.m_cuPelY + X265Tables.ZscanToPelY[cuGeom->absPartIdx];
+            uint blockX = ctu.m_cuPelX + X265Tables.ZscanToPelXPtr[cuGeom->absPartIdx];
+            uint blockY = ctu.m_cuPelY + X265Tables.ZscanToPelYPtr[cuGeom->absPartIdx];
             uint maxCols = (width + (uint)(loopIncr - 1)) / (uint)loopIncr;
             uint blockSize = (uint)m_param.maxCUSize >> (int)cuGeom->depth;
             double dQpOffset = 0;
