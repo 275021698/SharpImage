@@ -44,6 +44,68 @@ public sealed class X265PrimitivesTests
         await Assert.That(NQuantMismatches(depth)).IsEqualTo(0);
     }
 
+    [Test]
+    public async Task ResidualAndReconstruction_SimdMatchScalar()
+    {
+        await Assert.That(ResidualMismatches()).IsEqualTo(0);
+    }
+
+    private static unsafe int ResidualMismatches()
+    {
+        var rnd = new Random(3);
+        int bad = 0;
+        byte* f8 = stackalloc byte[32 * 40];
+        byte* p8 = stackalloc byte[32 * 40];
+        ushort* f16 = stackalloc ushort[32 * 40];
+        ushort* p16 = stackalloc ushort[32 * 40];
+        short* r = stackalloc short[32 * 40];
+        short* ra = stackalloc short[32 * 40];
+        short* rb = stackalloc short[32 * 40];
+        byte* o8a = stackalloc byte[32 * 40];
+        byte* o8b = stackalloc byte[32 * 40];
+        ushort* o16a = stackalloc ushort[32 * 40];
+        ushort* o16b = stackalloc ushort[32 * 40];
+        for (int iter = 0; iter < 400; iter++)
+        {
+            int n = 4 << (iter & 3);
+            for (int i = 0; i < 32 * 40; i++)
+            {
+                f8[i] = (byte)rnd.Next(256); p8[i] = (byte)rnd.Next(256);
+                f16[i] = (ushort)rnd.Next(1024); p16[i] = (ushort)rnd.Next(1024);
+                r[i] = (iter & 4) != 0 ? (short)rnd.Next(short.MinValue, short.MaxValue + 1) : (short)rnd.Next(-1100, 1101);
+            }
+
+            X265.X265Primitives.GetResidual(f8, p8, ra, 40, n);
+            X265.X265Primitives.GetResidualScalar(f8, p8, rb, 40, n);
+            bad += Diff(ra, rb, n);
+            X265.X265Primitives.CopyPS(ra, 40, f8, 40, n);
+            X265.X265Primitives.CopyPSScalar(rb, 40, f8, 40, n);
+            bad += Diff(ra, rb, n);
+            X265.X265Primitives.AddPS(o8a, 40, p8, r, 40, 40, n);
+            X265.X265Primitives.AddPSScalar(o8b, 40, p8, r, 40, 40, n);
+            for (int y = 0; y < n; y++) for (int x = 0; x < n; x++) if (o8a[(y * 40) + x] != o8b[(y * 40) + x]) bad++;
+
+            X265Hbd.X265Primitives.GetResidual(f16, p16, ra, 40, n);
+            X265Hbd.X265Primitives.GetResidualScalar(f16, p16, rb, 40, n);
+            bad += Diff(ra, rb, n);
+            X265Hbd.X265Primitives.CopyPS(ra, 40, f16, 40, n);
+            X265Hbd.X265Primitives.CopyPSScalar(rb, 40, f16, 40, n);
+            bad += Diff(ra, rb, n);
+            X265Hbd.X265Primitives.AddPS(o16a, 40, p16, r, 40, 40, n);
+            X265Hbd.X265Primitives.AddPSScalar(o16b, 40, p16, r, 40, 40, n);
+            for (int y = 0; y < n; y++) for (int x = 0; x < n; x++) if (o16a[(y * 40) + x] != o16b[(y * 40) + x]) bad++;
+        }
+
+        return bad;
+
+        static int Diff(short* a, short* b, int n)
+        {
+            int d = 0;
+            for (int y = 0; y < n; y++) for (int x = 0; x < n; x++) if (a[(y * 40) + x] != b[(y * 40) + x]) d++;
+            return d;
+        }
+    }
+
     // random, smooth and extreme (checkerboard 0 / max, the 8-bit SA8D lane overflow) blocks
     private static void Fill<T>(Span<T> p, Random rnd, int kind, int max) where T : System.Numerics.INumber<T>
     {

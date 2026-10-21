@@ -186,6 +186,77 @@ internal static unsafe partial class X265Primitives
         return (sse_t)(uint)Vector128.Sum(acc);
     }
 
+    // ---- residuals and reconstruction ----
+
+    // 8 pixels as int16
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector128<short> Load8(pixel* p)
+    {
+#if HIGH_BIT_DEPTH
+        return Vector128.Load(p).AsInt16();
+#else
+        return Vector128.WidenLower(Vector128.CreateScalarUnsafe(*(ulong*)p).AsByte()).AsInt16();
+#endif
+    }
+
+    /// <summary>getResidual: fenc - pred, n x n.</summary>
+    public static void GetResidual(pixel* fenc, pixel* pred, short* residual, long stride, int n)
+    {
+        if (!Vector128.IsHardwareAccelerated || n < 8)
+        {
+            GetResidualScalar(fenc, pred, residual, stride, n);
+            return;
+        }
+
+        for (int y = 0; y < n; y++, fenc += stride, pred += stride, residual += stride)
+        {
+            for (int x = 0; x < n; x += 8) (Load8(fenc + x) - Load8(pred + x)).Store(residual + x);
+        }
+    }
+
+    /// <summary>add_ps: clip(pred + residual) into a, n x n.</summary>
+    public static void AddPS(pixel* a, long dstride, pixel* b0, short* b1, long sstride0, long sstride1, int n)
+    {
+        if (!Vector128.IsHardwareAccelerated || n < 8)
+        {
+            AddPSScalar(a, dstride, b0, b1, sstride0, sstride1, n);
+            return;
+        }
+
+        var max = Vector128.Create(PIXEL_MAX);
+        for (int y = 0; y < n; y++, a += dstride, b0 += sstride0, b1 += sstride1)
+        {
+            for (int x = 0; x < n; x += 8)
+            {
+                var (p0, p1) = Vector128.Widen(Load8(b0 + x));
+                var (r0, r1) = Vector128.Widen(Vector128.Load(b1 + x));
+                var s0 = Vector128.Clamp(p0 + r0, Vector128<int>.Zero, max);
+                var s1 = Vector128.Clamp(p1 + r1, Vector128<int>.Zero, max);
+                var v = Vector128.Narrow(s0, s1).AsUInt16();
+#if HIGH_BIT_DEPTH
+                v.Store(a + x);
+#else
+                *(ulong*)(a + x) = Vector128.Narrow(v, v).AsUInt64().ToScalar();
+#endif
+            }
+        }
+    }
+
+    /// <summary>copy_ps: pixels to int16, n x n.</summary>
+    public static void CopyPS(short* dst, long dstStride, pixel* src, long srcStride, int n)
+    {
+        if (!Vector128.IsHardwareAccelerated || n < 8)
+        {
+            CopyPSScalar(dst, dstStride, src, srcStride, n);
+            return;
+        }
+
+        for (int y = 0; y < n; y++, dst += dstStride, src += srcStride)
+        {
+            for (int x = 0; x < n; x += 8) Load8(src + x).Store(dst + x);
+        }
+    }
+
     // One row of angular prediction: dst[x] = ((32 - f) * r[x] + f * r[x + 1] + 16) >> 5.
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static void AngularRow(pixel* dst, pixel* r, int f, int width)

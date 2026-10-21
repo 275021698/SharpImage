@@ -239,7 +239,7 @@ internal static unsafe partial class X265Primitives
         }
     }
 
-    public static void CopyPS(short* dst, long dstStride, pixel* src, long srcStride, int n)
+    internal static void CopyPSScalar(short* dst, long dstStride, pixel* src, long srcStride, int n)
     {
         for (int y = 0; y < n; y++)
         {
@@ -253,7 +253,7 @@ internal static unsafe partial class X265Primitives
         }
     }
 
-    public static void GetResidual(pixel* fenc, pixel* pred, short* residual, long stride, int n)
+    internal static void GetResidualScalar(pixel* fenc, pixel* pred, short* residual, long stride, int n)
     {
         for (int y = 0; y < n; y++)
         {
@@ -268,7 +268,7 @@ internal static unsafe partial class X265Primitives
         }
     }
 
-    public static void AddPS(pixel* a, long dstride, pixel* b0, short* b1, long sstride0, long sstride1, int n)
+    internal static void AddPSScalar(pixel* a, long dstride, pixel* b0, short* b1, long sstride0, long sstride1, int n)
     {
         for (int y = 0; y < n; y++)
         {

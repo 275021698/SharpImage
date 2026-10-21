@@ -902,7 +902,7 @@ internal sealed unsafe partial class X265Entropy
         0, 1, 4, 5, 2, 3, 4, 5, 6, 6, 8, 8, 7, 7, 8, 8,
     };
 
-    private static readonly byte* TableCntPtr = Pin(TableCnt);
+    internal static readonly byte* TableCntPtr = Pin(TableCnt);
 
     private static byte* Pin(byte[] a)
     {
