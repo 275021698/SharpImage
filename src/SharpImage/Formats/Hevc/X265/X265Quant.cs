@@ -519,6 +519,10 @@ internal sealed unsafe class X265Quant
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static long DeltaRdCost(long lambda2, int scaleBits, long d0, int dd, long deltabits) => ((((long)dd * dd) - d0) << scaleBits) + ((lambda2 * deltabits) >> 8);
 
+    // all ones when b, else zero (no branch)
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static long Mask(bool b) => -(long)Unsafe.As<bool, byte>(ref b);
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static long PsyValue(long psyScale, int psyShift, long rec) => (psyScale * rec) >> psyShift;
 
@@ -531,7 +535,8 @@ internal sealed unsafe class X265Quant
         public uint usePsyMask, trSize;
         public short* resiDct, fencDct, dstCoeff;
         public ushort* scan, scan4;
-        public int* unquantScale, sigBits0, sigBits1, rateIncUp, rateIncDown, sigRateDelta;
+        public int unquantStep;   // the dequantization step (flat: x265 without scaling lists)
+        public int* sigBits0, sigBits1, rateIncUp, rateIncDown, sigRateDelta;
         public long* costCoeff, costUncoded, costSig;
         public EstBitsSbac* est;
     }
@@ -556,7 +561,7 @@ internal sealed unsafe class X265Quant
         k.usePsyMask = usePsy ? ~0u : 0u;
         k.lambda2 = m_qpParam[ttype].lambda2;
         k.psyScale = (long)m_psyRdoqScale * m_qpParam[ttype].lambda;
-        k.unquantScale = m_dequantCoef[rem];
+        k.unquantStep = s_invQuantScales[rem] << per;
         k.per = per;
         k.unquantShift = QUANT_IQUANT_SHIFT - QUANT_SHIFT - transformShift;
         k.unquantRound = k.unquantShift > per ? 1 << (k.unquantShift - per - 1) : 0;
@@ -765,7 +770,27 @@ internal sealed unsafe class X265Quant
         uint c1Idx = 0;
         uint c2Idx = 0;
 
-        for (int scanPosinCG = (int)cgSize - 1; scanPosinCG >= 0; scanPosinCG--)
+        // positions past the last coefficient: their uncoded cost only
+        int top = Math.Min((int)cgSize - 1, k->lastScanPos - (int)scanPosBase);
+        for (int p = (int)cgSize - 1; p > top; p--)
+        {
+            uint scanPos = scanPosBase + (uint)p;
+            uint blkPos = k->scan[scanPos];
+            int signCoef = k->resiDct[blkPos];
+            long uncoded = ((long)signCoef * signCoef) << k->scaleBits;
+            if ((k->usePsyMask & scanPos) != 0)
+            {
+                uncoded -= PsyValue(k->psyScale, k->psyShift, k->fencDct[blkPos] - signCoef);
+            }
+
+            k->costUncoded[blkPos] = uncoded;
+            totalUncoded += uncoded;
+            k->costCoeff[scanPos] = 0;
+            k->costSig[scanPos] = 0;
+            totalRd += uncoded;
+        }
+
+        for (int scanPosinCG = top; scanPosinCG >= 0; scanPosinCG--)
         {
             uint scanPos = scanPosBase + (uint)scanPosinCG;
             uint blkPos = k->scan[scanPos];
@@ -786,13 +811,7 @@ internal sealed unsafe class X265Quant
             int* greaterOneBits = k->est->greaterOneBits + ((4 * ctxSet + c1) * 2);
             uint ctxSig = blkPos == 0 ? 0 : (uint)(((ctxCnt >> (4 * k->scan4[scanPosinCG])) & 0xF) + (ulong)ctxSigOffset);
 
-            if (scanPos > (uint)k->lastScanPos)
-            {
-                k->costCoeff[scanPos] = 0;
-                k->costSig[scanPos] = 0;
-                totalRd += uncoded;
-            }
-            else if ((subFlagMask & 1) == 0)
+            if ((subFlagMask & 1) == 0)
             {
                 // fast zero coeff path
                 long sigCost = SigCost(k->lambda2, k->sigBits0[ctxSig]);
@@ -832,7 +851,7 @@ internal sealed unsafe class X265Quant
                     sigCoefBits = (uint)k->sigBits1[ctxSig];
                 }
 
-                int unquantStep = k->unquantScale[blkPos] << k->per;
+                int unquantStep = k->unquantStep;
                 uint unQuantLevel = (uint)((maxAbsLevel * (uint)unquantStep) + k->unquantRound);
                 int absSignCoef = Math.Abs(signCoef);
                 if (maxAbsLevel == 1)
@@ -1085,8 +1104,7 @@ internal sealed unsafe class X265Quant
     {
         short* dstCoeff = k->dstCoeff;
         short* resiDct = k->resiDct;
-        int* unquantScale = k->unquantScale;
-        int per = k->per, unquantRound = k->unquantRound, unquantShift = k->unquantShift, scaleBits = k->scaleBits;
+        int step = k->unquantStep, unquantRound = k->unquantRound, unquantShift = k->unquantShift, scaleBits = k->scaleBits;
         long lambda2 = k->lambda2;
         ushort* scan4 = k->scan4;
         int realLastScanPos = (bestLastIdx - 1) >> LOG2_SCAN_SET_SIZE;
@@ -1116,39 +1134,38 @@ internal sealed unsafe class X265Quant
                     int curChange = 0;
                     uint lastCoeffAdjust = (uint)((lastCG & (Math.Abs((int)dstCoeff[codeParams.scan[lastNZPosInCG + subPos]]) == 1 ? 1 : 0)) * 4 * IEP_RATE);
 
+                    // every position's best change, both candidates computed and selected without branches: up (a
+                    // zero level raised to 1 is the same step), down (nonzero levels only)
+                    int* rateIncUp = k->rateIncUp, rateIncDown = k->rateIncDown, sigRateDelta = k->sigRateDelta;
                     for (n = lastCG != 0 ? lastNZPosInCG : SCAN_SET_SIZE - 1; n >= 0; --n)
                     {
                         uint blkPos = codeParams.scan[n + subPos];
+                        int level = dstCoeff[blkPos];
                         int signCoef = resiDct[blkPos];
-                        int absLevel = Math.Abs((int)dstCoeff[blkPos]);
-                        uint preDQuantLevelDiff = (uint)(unquantScale[blkPos] << per);
-                        uint unQuantLevel = (uint)((absLevel * (unquantScale[blkPos] << per)) + unquantRound);
-                        int d = Math.Abs(signCoef) - (int)(unQuantLevel >> unquantShift);
+                        int sm = signCoef >> 31;
+                        int absS = (signCoef ^ sm) - sm;
+                        int lm = level >> 31;
+                        int absLevel = (level ^ lm) - lm;
+                        uint unQuantLevel = (uint)((absLevel * step) + unquantRound);
+                        int d = absS - (int)(unQuantLevel >> unquantShift);
                         long origDist = (long)d * d;
-                        uint isOne = absLevel == 1 ? 1u : 0u;
-
-                        if (dstCoeff[blkPos] != 0)
-                        {
-                            d = Math.Abs(signCoef) - (int)((unQuantLevel + preDQuantLevelDiff) >> unquantShift);
-                            long costUp = DeltaRdCost(lambda2, scaleBits, origDist, d, k->rateIncUp[blkPos]);
-                            d = Math.Abs(signCoef) - (int)((unQuantLevel - preDQuantLevelDiff) >> unquantShift);
-                            int downBits = k->rateIncDown[blkPos] - (isOne != 0 ? IEP_RATE + k->sigRateDelta[blkPos] : 0);
-                            long costDown = DeltaRdCost(lambda2, scaleBits, origDist, d, downBits);
-                            costDown -= lastCoeffAdjust;
-                            curCost = ((n == firstNZPosInCG) && isOne != 0) ? long.MaxValue : costDown;
-                            curChange = (2 * (costUp < costDown ? 1 : 0)) - 1;
-                            curCost = costUp < costDown ? costUp : curCost;
-                        }
-                        else if (n < firstNZPosInCG && (signbit ^ signCoef) < 0)
-                        {
-                            curCost = long.MaxValue;
-                        }
-                        else
-                        {
-                            d = Math.Abs(signCoef) - (int)((preDQuantLevelDiff + (uint)unquantRound) >> unquantShift);
-                            curCost = DeltaRdCost(lambda2, scaleBits, origDist, d, k->rateIncUp[blkPos] + IEP_RATE + k->sigRateDelta[blkPos]);
-                            curChange = 1;
-                        }
+                        bool nz = level != 0;
+                        bool isOne = absLevel == 1;
+                        int extra = IEP_RATE + sigRateDelta[blkPos];
+                        int dUp = absS - (int)((unQuantLevel + (uint)step) >> unquantShift);
+                        long costUp = DeltaRdCost(lambda2, scaleBits, origDist, dUp, rateIncUp[blkPos] + (extra & ~(int)Mask(nz)));
+                        int dDown = absS - (int)((unQuantLevel - (uint)step) >> unquantShift);
+                        long costDown = DeltaRdCost(lambda2, scaleBits, origDist, dDown, rateIncDown[blkPos] - (extra & (int)Mask(isOne))) - lastCoeffAdjust;
+                        bool up = costUp < costDown;
+                        long mUp = Mask(up);
+                        long mFirstOne = Mask((n == firstNZPosInCG) & isOne);
+                        long downOrMax = (costDown & ~mFirstOne) | (long.MaxValue & mFirstOne);
+                        long nzCost = (costUp & mUp) | (downOrMax & ~mUp);
+                        long mBlocked = Mask((n < firstNZPosInCG) & ((signbit ^ signCoef) < 0));
+                        long zeroCost = (costUp & ~mBlocked) | (long.MaxValue & mBlocked);
+                        long mNz = Mask(nz);
+                        curCost = (nzCost & mNz) | (zeroCost & ~mNz);
+                        curChange = 1 - (2 & (int)(mNz & ~mUp));
 
                         if (curCost < minCostInc)
                         {
