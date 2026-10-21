@@ -402,6 +402,19 @@ public static class FormatRegistry
             return Encode(rgb, format);
         }
 
+        // A format that cannot describe the samples' colour space (no ICC profile / CICP) gets them in sRGB, converted
+        // through the colour management system, so wide-gamut, HDR or profiled images keep their colours; so does any
+        // format for a profile that cannot be attached to the samples (a gray LUT profile on gray expanded to RGB).
+        // JPEG XL keeps any profile of gray content as is.
+        if ((!CarriesColorDescription(format) || (format != ImageFileFormat.JpegXl && ColorDescription.NeedsConversion(image, rgbOutput: format is ImageFileFormat.WebP or ImageFileFormat.Heic))) &&
+            ColorDescription.ToSrgb(image) is { } srgb)
+        {
+            using (srgb)
+            {
+                return Encode(srgb, format);
+            }
+        }
+
         return format switch
         {
             ImageFileFormat.Png => EncodeToStream(image, (img, s) => PngCoder.Write(img, s)),
@@ -504,9 +517,14 @@ public static class FormatRegistry
         return WebpCoder.Read(ms);
     }
 
+    // Formats whose writers carry an ICC profile and/or CICP tags for the samples.
+    private static bool CarriesColorDescription(ImageFileFormat format) => format is ImageFileFormat.Png or ImageFileFormat.Jpeg or
+        ImageFileFormat.WebP or ImageFileFormat.Tiff or ImageFileFormat.JpegXl or ImageFileFormat.Avif or ImageFileFormat.Heic;
+
     /// <summary>
-    /// CMYK ink amounts to sRGB with the device formula ImageMagick and Pillow use when no colour profile is applied:
-    /// R = (1 - C)(1 - K) and likewise for G / B; alpha is kept.
+    /// CMYK ink amounts to sRGB: through the image's CMYK ICC profile with the colour management system (skcms, as
+    /// libjxl renders CMYK), else with the device formula ImageMagick and Pillow use when no colour profile is applied,
+    /// R = (1 - C)(1 - K) and likewise for G / B. Alpha is kept.
     /// </summary>
     internal static ImageFrame CmykToSrgb(ImageFrame cmyk)
     {
@@ -514,10 +532,38 @@ public static class FormatRegistry
         var rgb = new ImageFrame();
         rgb.Initialize(w, h, ColorspaceType.SRGB, cmyk.HasAlpha);
         int dc = rgb.NumberOfChannels;
+        Jxl.Lj.LjCms.Transform? cms = null;
+        if (cmyk.IccProfile is { Length: > 0 } icc && Jxl.Lj.LjCms.FromIcc(icc) is { Cmyk: true } profile)
+        {
+            cms = Jxl.Lj.LjCms.Transform.Create(profile, Jxl.Lj.LjCe.Srgb(false), 255f);
+        }
+
+        var src = new float[w * 4];
+        var dst = new float[w * 3];
         for (int y = 0; y < h; y++)
         {
             var s = cmyk.GetPixelRow(y);
             var d = rgb.GetPixelRowForWrite(y);
+            if (cms != null)
+            {
+                // The CMS takes CMYK as JPEG XL stores it: 0 = full ink, 1 = none.
+                for (int x = 0; x < w; x++)
+                {
+                    for (int c = 0; c < 4; c++)
+                        src[(x * 4) + c] = 1f - (s[(x * sc) + c] * (1f / 65535f));
+                }
+
+                cms.Run(src, dst, w);
+                for (int x = 0; x < w; x++)
+                {
+                    for (int c = 0; c < 3; c++)
+                        d[(x * dc) + c] = (ushort)MathF.Round(Math.Clamp(dst[(x * 3) + c], 0f, 1f) * 65535f, MidpointRounding.ToEven);
+                    if (cmyk.HasAlpha) d[(x * dc) + 3] = s[(x * sc) + sc - 1];
+                }
+
+                continue;
+            }
+
             for (int x = 0; x < w; x++)
             {
                 int so = x * sc, dofs = x * dc;

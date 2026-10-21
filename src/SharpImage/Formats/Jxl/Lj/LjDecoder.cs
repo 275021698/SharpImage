@@ -49,7 +49,9 @@ internal static class LjDecoder
     /// <summary>Decodes a bare JPEG XL codestream. <paramref name="maxFrames"/> limits the displayed frames returned.
     /// <paramref name="cmykToSrgb"/> renders CMYK images (a black extra channel) to sRGB through the CMS the way djxl does
     /// for output formats without CMYK; otherwise they come out as raw C, M, Y planes plus the black channel.
-    /// <paramref name="cmsOutput"/> converts the image to that encoding through the CMS (djxl --color_space).</summary>
+    /// <paramref name="cmsOutput"/> converts the image to that encoding through the CMS (djxl --color_space).
+    /// <paramref name="preferSrgb"/> renders an XYB image whose encoding has no transfer function libjxl can output
+    /// (and no ICC profile) to sRGB instead of linear sRGB.</summary>
     public static LjDecodedImage Decode(byte[] cs, int maxFrames = int.MaxValue, LjColorEncoding? desired = null, bool preferSrgb = false,
         bool cmykToSrgb = false, LjColorEncoding? cmsOutput = null)
     {
@@ -89,7 +91,7 @@ internal static class LjDecoder
         {
             st.Output.SetColorEncoding(desired);
         }
-        else if (preferSrgb && st.Meta.XybEncoded && MapColorspace(st.Meta.ColorEncoding) == null)
+        else if (preferSrgb && st.Meta.XybEncoded && !st.Meta.ColorEncoding.WantIcc && !LjCe.CanOutputTo(st.Meta.ColorEncoding))
         {
             st.Output.SetColorEncoding(LjCe.Srgb(LjCe.IsGray(st.Meta.ColorEncoding)));
         }

@@ -1,5 +1,6 @@
 using SharpImage.Core;
 using SharpImage.Image;
+using SharpImage.Metadata;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
@@ -93,12 +94,16 @@ public static class WebpCoder
 
         if (vp8lData != null)
         {
-            return DecodeVp8l(vp8lData);
+            var lossless = DecodeVp8l(vp8lData);
+            ReadMetadataChunks(data, lossless);
+            return lossless;
         }
 
         if (vp8Data != null)
         {
-            return DecodeVp8Lossy(vp8Data, alphData);
+            var lossy = DecodeVp8Lossy(vp8Data, alphData);
+            ReadMetadataChunks(data, lossy);
+            return lossy;
         }
 
         // An animated WebP: the first frame, composited onto the canvas (WebPAnimDecoder).
@@ -126,16 +131,141 @@ public static class WebpCoder
     /// libwebp's WebPEncode / cwebp with the same options.</summary>
     public static void Write(ImageFrame image, Stream stream, WebP.WebpLossyOptions options)
     {
-        byte[] webp = WebP.Vp8Encoder.Encode(ImageFrameToArgb(image), (int)image.Columns, (int)image.Rows, options);
-        stream.Write(webp);
+        using ImageFrame? converted = PrepareColor(image, out byte[]? icc);
+        ImageFrame src = converted ?? image;
+        byte[] webp = WebP.Vp8Encoder.Encode(ImageFrameToArgb(src), (int)src.Columns, (int)src.Rows, options);
+        stream.Write(AddMetadataChunks(webp, icc, src.Metadata, (int)src.Columns, (int)src.Rows));
     }
 
     /// <summary>Writes an image as lossless WebP (VP8L) — byte-identical to libwebp's WebPEncode / cwebp -lossless with
     /// the same options.</summary>
     public static void Write(ImageFrame image, Stream stream, WebP.WebpLosslessOptions options)
     {
-        byte[] webp = WebP.Vp8lEncoder.EncodeImage(ImageFrameToArgb(image), (int)image.Columns, (int)image.Rows, options);
-        stream.Write(webp);
+        using ImageFrame? converted = PrepareColor(image, out byte[]? icc);
+        ImageFrame src = converted ?? image;
+        byte[] webp = WebP.Vp8lEncoder.EncodeImage(ImageFrameToArgb(src), (int)src.Columns, (int)src.Rows, options);
+        stream.Write(AddMetadataChunks(webp, icc, src.Metadata, (int)src.Columns, (int)src.Rows));
+    }
+
+    // The ICC profile to store with the RGB samples; a gray image whose colour cannot be described in RGB is
+    // converted to sRGB first (returned, to be disposed by the caller).
+    private static ImageFrame? PrepareColor(ImageFrame image, out byte[]? icc)
+    {
+        icc = ColorDescription.ResolveRgbIcc(image, out bool convert);
+        return convert ? ColorDescription.ToSrgb(image) : null;
+    }
+
+    /// <summary>
+    /// Adds the ICCP / EXIF / XMP chunks to an encoded WebP the way libwebp's mux (cwebp -metadata, img2webp) lays
+    /// them out: a VP8X header with the matching flags first, ICCP right after it, EXIF and XMP after the image data.
+    /// </summary>
+    private static byte[] AddMetadataChunks(byte[] webp, byte[]? icc, ImageMetadata meta, int width, int height)
+    {
+        byte[]? exif = meta.ExifProfile != null ? ExifParser.SerializeForPngExif(meta.ExifProfile) : null;
+        byte[]? xmp = meta.Xmp != null ? System.Text.Encoding.UTF8.GetBytes(meta.Xmp) : null;
+        if (icc == null && exif == null && xmp == null)
+        {
+            return webp;
+        }
+
+        int flags = 0;
+        int canvasW = width, canvasH = height;
+        var body = new List<(int Start, int Length)>();
+        int offset = 12;
+        while (offset + 8 <= webp.Length)
+        {
+            uint size = BitConverter.ToUInt32(webp, offset + 4);
+            int total = 8 + (int)size + (int)(size & 1);
+            string fourcc = System.Text.Encoding.ASCII.GetString(webp, offset, 4);
+            if (fourcc == "VP8X")
+            {
+                flags = webp[offset + 8];
+                canvasW = Read24LE(webp, offset + 12) + 1;
+                canvasH = Read24LE(webp, offset + 15) + 1;
+            }
+            else
+            {
+                if (fourcc == "ALPH" || (fourcc == "VP8L" && size >= 5 && (webp[offset + 12] & 0x10) != 0))
+                {
+                    flags |= 0x10;   // alpha
+                }
+
+                body.Add((offset, Math.Min(total, webp.Length - offset)));
+            }
+
+            offset += total;
+        }
+
+        flags |= (icc != null ? 0x20 : 0) | (exif != null ? 0x08 : 0) | (xmp != null ? 0x04 : 0);
+        using var ms = new MemoryStream(webp.Length + 64 + (icc?.Length ?? 0) + (exif?.Length ?? 0) + (xmp?.Length ?? 0));
+        ms.Write("RIFF"u8);
+        ms.Write(new byte[4]);
+        ms.Write("WEBP"u8);
+        byte[] vp8x = new byte[10];
+        vp8x[0] = (byte)flags;
+        Write24LE(vp8x, 4, canvasW - 1);
+        Write24LE(vp8x, 7, canvasH - 1);
+        WriteRiffChunk(ms, "VP8X"u8, vp8x);
+        if (icc != null) WriteRiffChunk(ms, "ICCP"u8, icc);
+        foreach (var (start, length) in body)
+        {
+            ms.Write(webp, start, length);
+        }
+
+        if (exif != null) WriteRiffChunk(ms, "EXIF"u8, exif);
+        if (xmp != null) WriteRiffChunk(ms, "XMP "u8, xmp);
+        byte[] result = ms.ToArray();
+        BinaryPrimitives.WriteUInt32LittleEndian(result.AsSpan(4), (uint)(result.Length - 8));
+        return result;
+    }
+
+    private static void WriteRiffChunk(Stream s, ReadOnlySpan<byte> fourcc, ReadOnlySpan<byte> payload)
+    {
+        s.Write(fourcc);
+        Span<byte> size = stackalloc byte[4];
+        BinaryPrimitives.WriteUInt32LittleEndian(size, (uint)payload.Length);
+        s.Write(size);
+        s.Write(payload);
+        if ((payload.Length & 1) != 0) s.WriteByte(0);
+    }
+
+    private static void Write24LE(byte[] data, int offset, int v)
+    {
+        data[offset] = (byte)v;
+        data[offset + 1] = (byte)(v >> 8);
+        data[offset + 2] = (byte)(v >> 16);
+    }
+
+    /// <summary>The top-level ICCP / EXIF / XMP chunks of a WebP file into the frame's metadata.</summary>
+    private static void ReadMetadataChunks(byte[] data, ImageFrame frame)
+    {
+        int offset = 12;
+        while (offset + 8 <= data.Length)
+        {
+            uint size = BitConverter.ToUInt32(data, offset + 4);
+            int len = (int)Math.Min(size, (uint)(data.Length - offset - 8));
+            var payload = data.AsSpan(offset + 8, len);
+            byte c0 = data[offset], c1 = data[offset + 1], c2 = data[offset + 2], c3 = data[offset + 3];
+            if (c0 == 'I' && c1 == 'C' && c2 == 'C' && c3 == 'P' && len > 0)
+            {
+                frame.Metadata.IccProfile = new IccProfile(payload.ToArray());
+            }
+            else if (c0 == 'E' && c1 == 'X' && c2 == 'I' && c3 == 'F' && len > 0)
+            {
+                // Raw TIFF data per the container spec; some writers keep JPEG's "Exif\0\0" prefix.
+                if (payload.StartsWith("Exif\0\0"u8)) payload = payload[6..];
+                frame.Metadata.ExifProfile = ExifParser.ParseFromTiff(payload);
+                if (ExifParser.OrientationOf(frame.Metadata.ExifProfile) is not OrientationType.Undefined and var orientation)
+                    frame.Orientation = orientation;
+            }
+            else if (c0 == 'X' && c1 == 'M' && c2 == 'P' && c3 == ' ' && len > 0)
+            {
+                frame.Metadata.Xmp = System.Text.Encoding.UTF8.GetString(payload);
+            }
+
+            offset += 8 + (int)Math.Min(size, (uint)(data.Length - offset - 8));
+            if ((size & 1) != 0) offset++;
+        }
     }
     /// <summary>
     /// Read an animated WebP file into an ImageSequence.
@@ -206,6 +336,7 @@ public static class WebpCoder
             // Convert duration from ms to centiseconds (like GIF)
             frame.Delay = Math.Max(1, animFrames[f].DurationMs / 10);
             frame.DisposeMethod = DisposeType.None;   // frames are already composited onto the full canvas
+            ReadMetadataChunks(data, frame);
             sequence.AddFrame(frame);
         }
 
@@ -345,6 +476,8 @@ public static class WebpCoder
             }
         }
 
+        // The animation's colour and metadata are the first frame's (gray frames are stored as RGB).
+        byte[]? icc = ColorDescription.ResolveRgbIcc(sequence[0], out bool convert);
         var enc = new WebP.WebpAnimEncoder(canvasWidth, canvasHeight, options);
         var canvas = new uint[canvasWidth * canvasHeight];   // transparent
         uint[]? beforePrevious = null;
@@ -352,7 +485,16 @@ public static class WebpCoder
         for (int i = 0; i < sequence.Count; i++)
         {
             var frame = sequence[i];
-            uint[] argb = ImageFrameToArgb(frame);
+            uint[] argb;
+            if (convert && ColorDescription.ToSrgb(frame) is { } srgb)
+            {
+                using (srgb) argb = ImageFrameToArgb(srgb);
+            }
+            else
+            {
+                argb = ImageFrameToArgb(frame);
+            }
+
             uint[] full;
             if (fullCanvases)
             {
@@ -391,7 +533,7 @@ public static class WebpCoder
             timestamp += durationMs;
         }
         enc.Add(null, timestamp);
-        stream.Write(enc.Assemble());
+        stream.Write(AddMetadataChunks(enc.Assemble(), icc, sequence[0].Metadata, canvasWidth, canvasHeight));
     }
 
     private static void ClearRect(uint[] canvas, int canvasWidth, int canvasHeight, int left, int top, int width, int height)

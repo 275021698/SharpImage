@@ -1101,11 +1101,7 @@ public static class Geometry
     // The pixels are now upright: a kept Exif orientation tag must say so, or viewers would rotate them again.
     private static void ResetExifOrientation(ImageFrame frame)
     {
-        if (frame.Metadata.ExifProfile is { } exif && exif.GetTag(SharpImage.Metadata.ExifTag.Orientation) is { } ot)
-        {
-            byte[] one = exif.IsLittleEndian ? [1, 0] : [0, 1];
-            exif.SetTag(new SharpImage.Metadata.ExifEntry { Tag = ot.Tag, DataType = SharpImage.Metadata.ExifDataType.Short, Count = 1, Value = one });
-        }
+        SharpImage.Metadata.ExifParser.ResetOrientation(frame.Metadata.ExifProfile);
     }
 
     /// <summary>

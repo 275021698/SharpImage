@@ -218,7 +218,7 @@ internal static partial class JxlEncoder
         // Grayscale (r == g == b everywhere) encodes as a single gray channel (plus alpha) with no colour
         // transform, as libjxl does for grayscale input, when the colour description allows it.
         (LjColorEncoding enc, byte[]? icc) = LosslessColor(image, IsGrayscale(r, g, b, w * h));
-        return EncodeCore(r, g, b, w, h, nb, gray: LjCe.IsGray(enc), bits, alpha, enc, icc, profile);
+        return EncodeCore(r, g, b, w, h, nb, gray: LjCe.IsGray(enc), bits, alpha, enc, icc, profile, HeaderOrientation(image));
     }
 
     // The colour encoding of a lossless (non-XYB) codestream. Its samples are the image's own, so its own colour
@@ -275,7 +275,8 @@ internal static partial class JxlEncoder
         main.WriteBits(0x0A, 8);
         WriteSizeHeader(main, w, h);
         (LjColorEncoding animEnc, byte[]? animIcc) = LosslessColor(frames[0], contentGray: false);
-        WriteImageMetadata(main, animEnc, animIcc, bits, numExtra, animation: true, numLoops: (uint)Math.Max(0, seq.LoopCount));
+        WriteImageMetadata(main, animEnc, animIcc, bits, numExtra, animation: true, numLoops: (uint)Math.Max(0, seq.LoopCount),
+            orientation: HeaderOrientation(frames[0]));
         main.JumpToByteBoundary();
 
         for (int i = 0; i < frames.Count; i++)
@@ -328,10 +329,14 @@ internal static partial class JxlEncoder
         return (r, g, b, alpha);
     }
 
-    private static byte[] EncodeCore(int[] r, int[] g, int[] b, int w, int h, int nb, bool gray, int bits, int[]? alpha, LjColorEncoding enc, byte[]? icc, LosslessProfile? profile = null)
+    /// <summary>The codestream orientation (1..8) of an image: its EXIF-style orientation, as cjxl takes it from Exif.</summary>
+    internal static uint HeaderOrientation(ImageFrame image) =>
+        image.Orientation is >= Core.OrientationType.TopLeft and <= Core.OrientationType.LeftBottom ? (uint)image.Orientation : 1u;
+
+    private static byte[] EncodeCore(int[] r, int[] g, int[] b, int w, int h, int nb, bool gray, int bits, int[]? alpha, LjColorEncoding enc, byte[]? icc, LosslessProfile? profile = null, uint orientation = 1)
     {
         var (sections, shift) = EncodeCoreSections(r, g, b, w, h, nb, gray, bits, alpha, profile);
-        return AssembleCodestream(w, h, shift, sections, bits, alpha != null ? 1 : 0, enc, icc);
+        return AssembleCodestream(w, h, shift, sections, bits, alpha != null ? 1 : 0, enc, icc, orientation);
     }
 
     // Returns the frame's Modular sections + the group-size shift (the caller assembles them into a single-
@@ -444,13 +449,13 @@ internal static partial class JxlEncoder
     /// <summary>A modular channel to encode: pixel data with its own dimensions.</summary>
     private readonly record struct EncChannel(int[] Data, int W, int H);
 
-    private static byte[] AssembleCodestream(int w, int h, int shift, byte[][] sections, int bits, int numExtra, LjColorEncoding enc, byte[]? icc)
+    private static byte[] AssembleCodestream(int w, int h, int shift, byte[][] sections, int bits, int numExtra, LjColorEncoding enc, byte[]? icc, uint orientation)
     {
         var main = new JxlBitWriter();
         main.WriteBits(0xFF, 8);
         main.WriteBits(0x0A, 8);
         WriteSizeHeader(main, w, h);
-        WriteImageMetadata(main, enc, icc, bits, numExtra);
+        WriteImageMetadata(main, enc, icc, bits, numExtra, orientation: orientation);
         main.JumpToByteBoundary();
         WriteFrameBody(main, shift, sections, numExtra, isLast: true, durationTicks: 0);
         return main.ToArray();
@@ -500,20 +505,25 @@ internal static partial class JxlEncoder
         w.WriteU32((uint)width, E.BitsOff(9, 1), E.BitsOff(13, 1), E.BitsOff(18, 1), E.BitsOff(30, 1));
     }
 
-    private static void WriteImageMetadata(JxlBitWriter w, LjColorEncoding enc, byte[]? icc, int bits = 8, int numExtra = 0, bool animation = false, uint numLoops = 0)
+    private static void WriteImageMetadata(JxlBitWriter w, LjColorEncoding enc, byte[]? icc, int bits = 8, int numExtra = 0, bool animation = false, uint numLoops = 0,
+        uint orientation = 1)
     {
+        bool extraFields = animation || orientation != 1;
         w.WriteBool(false); // not all_default
-        w.WriteBool(animation); // extra_fields (only needed to carry animation)
-        if (animation)
+        w.WriteBool(extraFields); // extra_fields (only needed to carry an orientation or animation)
+        if (extraFields)
         {
-            w.WriteBits(0, 3);   // orientation - 1 = 0
+            w.WriteBits(orientation - 1, 3);
             w.WriteBool(false);  // have_intrinsic_size = false
             w.WriteBool(false);  // have_preview = false
-            w.WriteBool(true);   // have_animation = true
-            w.WriteU32(100, E.Val(100), E.Val(1000), E.BitsOff(10, 1), E.BitsOff(30, 1)); // tps_numerator (100 => ticks are centiseconds)
-            w.WriteU32(1, E.Val(1), E.Val(1001), E.BitsOff(8, 1), E.BitsOff(10, 1));       // tps_denominator = 1
-            w.WriteU32(numLoops, E.Val(0), E.BitsOff(3, 0), E.BitsOff(16, 0), E.BitsOff(32, 0)); // num_loops (0 = infinite)
-            w.WriteBool(false);  // have_timecodes = false
+            w.WriteBool(animation);   // have_animation
+            if (animation)
+            {
+                w.WriteU32(100, E.Val(100), E.Val(1000), E.BitsOff(10, 1), E.BitsOff(30, 1)); // tps_numerator (100 => ticks are centiseconds)
+                w.WriteU32(1, E.Val(1), E.Val(1001), E.BitsOff(8, 1), E.BitsOff(10, 1));       // tps_denominator = 1
+                w.WriteU32(numLoops, E.Val(0), E.BitsOff(3, 0), E.BitsOff(16, 0), E.BitsOff(32, 0)); // num_loops (0 = infinite)
+                w.WriteBool(false);  // have_timecodes = false
+            }
         }
 
         w.WriteBool(false); // bit depth: not floating
@@ -545,7 +555,7 @@ internal static partial class JxlEncoder
         w.WriteBool(false); // xyb_encoded = false
         JxlXybColor.WriteBits(w, lw => LjFields.Write(enc, lw)); // ColorEncoding (fields, or an ICC's colour space)
 
-        if (animation)
+        if (extraFields)
         {
             w.WriteBool(true); // ToneMapping all_default (only present when extra_fields is set)
         }

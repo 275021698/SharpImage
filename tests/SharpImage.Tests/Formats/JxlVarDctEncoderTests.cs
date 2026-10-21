@@ -1413,15 +1413,32 @@ public class JxlVarDctEncoderTests
 
         string cms = System.IO.Path.Combine(AppContext.BaseDirectory, "TestAssets", "jxl", "cms");
 
-        // A table-based profile no enumerated encoding describes: stored exactly; XYB renders to sRGB on decode.
+        // A table-based profile no enumerated encoding describes: stored exactly; the decoder renders the XYB image
+        // back into the profile's space through the CMS and attaches the profile.
         byte[] lut = System.IO.File.ReadAllBytes(System.IO.Path.Combine(cms, "icc_lut_srgb.icc"));
-        byte[] cs = SharpImage.Formats.JxlCoder.EncodeLossy(Make(lut), quality: 90, effort: 7);
+        ImageFrame source = Make(lut);
+        byte[] cs = SharpImage.Formats.JxlCoder.EncodeLossy(source, quality: 90, effort: 7);
         var lj = SharpImage.Formats.Jxl.Lj.LjDecoder.Decode(cs, 1);
         await Assert.That(lj.Icc).IsNotNull();
         await Assert.That(lj.Icc!.AsSpan().SequenceEqual(lut)).IsTrue();
-        ImageFrame dec = SharpImage.Formats.JxlCoder.Decode(cs);
-        await Assert.That(dec.IccProfile).IsNull();
+        using ImageFrame dec = SharpImage.Formats.JxlCoder.Decode(cs);
+        await Assert.That(dec.IccProfile).IsNotNull();
+        await Assert.That(dec.IccProfile!.AsSpan().SequenceEqual(lut)).IsTrue();
         await Assert.That(dec.Columns).IsEqualTo(w);
+        double err = 0;
+        for (int y = 0; y < h; y++)
+        {
+            var a = source.GetPixelRow(y);
+            var b = dec.GetPixelRow(y);
+            for (int i = 0; i < w * 3; i++)
+            {
+                double d = (a[i] - b[i]) / 65535.0;
+                err += d * d;
+            }
+        }
+
+        double psnr = 10 * Math.Log10(1 / Math.Max(1e-12, err / (w * h * 3)));
+        await Assert.That(psnr).IsGreaterThan(38.0);   // quality 90, back in the source's own colour space
 
         // libjxl's own Display P3 profile: written as the enumerated P3 encoding, decoded back to Display P3.
         byte[] p3 = System.IO.File.ReadAllBytes(System.IO.Path.Combine(cms, "icc", "DisplayP3.icc"));

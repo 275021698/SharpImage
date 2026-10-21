@@ -42,6 +42,18 @@ public sealed class ImageMetadata
     /// </summary>
     public PixelAspectRatio? PixelAspectRatio { get; set; }
 
+    /// <summary>
+    /// The ICC rendering intent the source declares for its colour space (0 perceptual, 1 relative colorimetric,
+    /// 2 saturation, 3 absolute colorimetric) — PNG 'sRGB', a JPEG XL colour encoding; null when not signalled.
+    /// </summary>
+    public int? RenderingIntent { get; set; }
+
+    /// <summary>
+    /// Whether <see cref="IccProfile"/> was made for an enumerated colour encoding (true: JPEG XL decoding attached
+    /// libjxl's profile for it) or is the source's own profile (false); null when unknown.
+    /// </summary>
+    internal bool? IccFromEncoding { get; set; }
+
     /// <summary>HDR content light level (CTA-861.3 MaxCLL / MaxFALL, cd/m²) — AVIF/HEIF 'clli'.</summary>
     public ContentLightLevel? ContentLightLevel { get; set; }
 
@@ -66,6 +78,8 @@ public sealed class ImageMetadata
             Xmp = Xmp,
             IptcProfile = IptcProfile?.Clone(),
             Cicp = Cicp,
+            RenderingIntent = RenderingIntent,
+            IccFromEncoding = IccFromEncoding,
             PixelAspectRatio = PixelAspectRatio,
             ContentLightLevel = ContentLightLevel,
             MasteringDisplay = MasteringDisplay
@@ -438,21 +452,63 @@ public sealed class ExifProfile
     /// <summary>
     /// Sets or replaces a tag in IFD0.
     /// </summary>
+    /// <remarks>
+    /// <see cref="RawData"/> stays in step: a value of the same type and count that fits the IFD entry (4 bytes or
+    /// less, like Orientation) is patched in place, keeping the rest of the original block byte for byte; any other
+    /// change drops the raw block so writers rebuild it from the tags.
+    /// </remarks>
     public void SetTag(ExifEntry entry)
     {
         for (int i = 0; i < Ifd0Tags.Count; i++)
         {
             if (Ifd0Tags[i].Tag == entry.Tag)
             {
+                ExifEntry old = Ifd0Tags[i];
                 Ifd0Tags[i] = entry;
+                if (!(old.DataType == entry.DataType && old.Count == entry.Count && entry.Value is { Length: <= 4 } v &&
+                      old.Value?.Length == v.Length && PatchRawIfd0Value(entry.Tag, v)))
+                {
+                    RawData = null;
+                }
+
                 return;
             }
         }
         Ifd0Tags.Add(entry);
+        RawData = null;
+    }
+
+    // Overwrites the inline value of an IFD0 entry in RawData; false when the entry is not found there.
+    private bool PatchRawIfd0Value(ushort tag, byte[] value)
+    {
+        byte[]? raw = RawData;
+        if (raw is not { Length: >= 8 })
+            return false;
+        bool le = raw[0] == 0x49;
+        uint U32(int p) => le ? System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(raw.AsSpan(p)) : System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(raw.AsSpan(p));
+        ushort U16(int p) => le ? System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(raw.AsSpan(p)) : System.Buffers.Binary.BinaryPrimitives.ReadUInt16BigEndian(raw.AsSpan(p));
+        long ifd = U32(4);
+        if (ifd + 2 > raw.Length)
+            return false;
+        int count = U16((int)ifd);
+        for (int i = 0; i < count; i++)
+        {
+            long e = ifd + 2 + (i * 12L);
+            if (e + 12 > raw.Length)
+                return false;
+            if (U16((int)e) == tag)
+            {
+                Array.Clear(raw, (int)e + 8, 4);
+                value.CopyTo(raw, (int)e + 8);
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>
-    /// Removes a tag from all IFDs.
+    /// Removes a tag from all IFDs (the raw block is dropped so writers rebuild it from the tags).
     /// </summary>
     public bool RemoveTag(ushort tag)
     {
@@ -460,6 +516,8 @@ public sealed class ExifProfile
         removed |= Ifd0Tags.RemoveAll(e => e.Tag == tag) > 0;
         removed |= ExifTags.RemoveAll(e => e.Tag == tag) > 0;
         removed |= GpsTags.RemoveAll(e => e.Tag == tag) > 0;
+        if (removed)
+            RawData = null;
         return removed;
     }
 

@@ -14,7 +14,16 @@ internal static class HeicEncoder
     /// Encodes 8-bit RGB (row-major, channels: r,g,b[,a]) into a HEIC file. With 4 channels the alpha plane is a second,
     /// hidden HEVC item linked to the colour item as its alpha auxiliary image ('auxl' + auxC), as libheif writes it.
     /// </summary>
-    public static byte[] Encode(ReadOnlySpan<byte> rgb, int width, int height, int channels, int qp, bool signDataHiding)
+    /// <param name="colorPrimaries">CICP colour primaries of the RGB samples (colr nclx).</param>
+    /// <param name="transferCharacteristics">CICP transfer characteristics of the RGB samples.</param>
+    /// <param name="icc">An ICC profile describing the samples (colr prof), or null.</param>
+    /// <param name="exif">EXIF as raw TIFF data (an 'Exif' item), or null.</param>
+    /// <param name="xmp">An XMP packet (a 'mime' item, application/rdf+xml), or null.</param>
+    /// <param name="irot">Display rotation (irot, anti-clockwise quarter turns), or null.</param>
+    /// <param name="imir">Display mirror (imir: 0 = top/bottom, 1 = left/right, after irot), or null.</param>
+    public static byte[] Encode(ReadOnlySpan<byte> rgb, int width, int height, int channels, int qp, bool signDataHiding,
+        int colorPrimaries = 1, int transferCharacteristics = 13, byte[]? icc = null, byte[]? exif = null, byte[]? xmp = null,
+        int? irot = null, int? imir = null)
     {
         int pw = (width + 31) & ~31;
         int ph = (height + 31) & ~31;
@@ -67,7 +76,8 @@ internal static class HeicEncoder
             (alphaHvcC, alphaSample) = EncodeItem(alpha, neutral, (byte[])neutral.Clone(), pw, ph, evenW, evenH, qp, signDataHiding);
         }
 
-        return BuildIsoBmff(width, height, evenW, evenH, hvcC, sample, alphaHvcC, alphaSample);
+        return BuildIsoBmff(width, height, evenW, evenH, hvcC, sample, alphaHvcC, alphaSample, colorPrimaries, transferCharacteristics, icc,
+            exif, xmp, irot, imir);
     }
 
     /// <summary>One HEVC still: its hvcC configuration and the 4-byte-length-prefixed slice NAL (the item's data).</summary>
@@ -126,21 +136,40 @@ internal static class HeicEncoder
     }
 
     private static byte[] BuildIsoBmff(int width, int height, int codedW, int codedH, byte[] hvcC, byte[] sample,
-        byte[]? alphaHvcC, byte[]? alphaSample)
+        byte[]? alphaHvcC, byte[]? alphaSample, int colorPrimaries, int transferCharacteristics, byte[]? icc,
+        byte[]? exif, byte[]? xmp, int? irot, int? imir)
     {
         bool hasAlpha = alphaHvcC != null;
         byte[] ftyp = Box("ftyp", Concat(Fourcc("heic"), U32(0), Fourcc("mif1"), Fourcc("heic")));
 
-        // property container: ipco { hvcC, ispe, colr[, clap][, alpha hvcC, auxC] }
+        // property container: ipco { hvcC, ispe, colr nclx[, colr prof][, clap][, alpha hvcC, auxC] }
         byte[] ispe = FullBox("ispe", 0, 0, Concat(U32((uint)codedW), U32((uint)codedH)));
-        byte[] colr = Box("colr", Concat(Fourcc("nclx"), U16(1), U16(13), U16(6), new byte[] { 0x80 })); // BT.601, full range
+        byte[] colr = Box("colr", Concat(Fourcc("nclx"), U16(colorPrimaries), U16(transferCharacteristics), U16(6), new byte[] { 0x80 })); // BT.601, full range
         bool crop = codedW != width || codedH != height;
         // clap: clean aperture width/height and the offset of its centre from the coded picture's centre (all as
         // fractions N/D); dropping the last column / row moves the centre by -1/2.
         byte[] clap = Box("clap", Concat(U32((uint)width), U32(1), U32((uint)height), U32(1),
             U32((uint)(width - codedW)), U32(2), U32((uint)(height - codedH)), U32(2)));
         var props = new List<byte[]> { Box("hvcC", hvcC), ispe, colr };
+        if (icc != null) props.Add(Box("colr", Concat(Fourcc("prof"), icc)));
+        int profIndex = icc != null ? props.Count : 0;
         if (crop) props.Add(clap);
+        int clapIndex = crop ? props.Count : 0;
+        // transformative properties (essential), in MIAF order clap, irot, imir; shared by the alpha item
+        var transforms = new List<byte>();
+        if (crop) transforms.Add((byte)(0x80 | clapIndex));
+        if (irot is 1 or 2 or 3)
+        {
+            props.Add(Box("irot", new[] { (byte)irot.Value }));
+            transforms.Add((byte)(0x80 | props.Count));
+        }
+
+        if (imir is 0 or 1)
+        {
+            props.Add(Box("imir", new[] { (byte)imir.Value }));
+            transforms.Add((byte)(0x80 | props.Count));
+        }
+
         int alphaHvcCIndex = 0, auxCIndex = 0;
         if (hasAlpha)
         {
@@ -151,15 +180,16 @@ internal static class HeicEncoder
         }
         byte[] ipco = Box("ipco", Concat(props.ToArray()));
 
-        // ipma: item 1 -> hvcC (essential), ispe, colr[, clap (essential)];
-        //       item 2 (alpha) -> its hvcC (essential), ispe[, clap (essential)], auxC (essential)
+        // ipma: item 1 -> hvcC (essential), ispe, colr nclx[, colr prof][, clap, irot, imir (essential)];
+        //       item 2 (alpha) -> its hvcC (essential), ispe[, clap, irot, imir (essential)], auxC (essential)
         var e1 = new List<byte> { 0x81, 0x02, 0x03 };
-        if (crop) e1.Add(0x84);
+        if (profIndex != 0) e1.Add((byte)profIndex);
+        e1.AddRange(transforms);
         var ipmaEntries = new List<byte[]> { Concat(U16(1), new[] { (byte)e1.Count }, e1.ToArray()) };
         if (hasAlpha)
         {
             var e2 = new List<byte> { (byte)(0x80 | alphaHvcCIndex), 0x02 };
-            if (crop) e2.Add(0x84);
+            e2.AddRange(transforms);
             e2.Add((byte)(0x80 | auxCIndex));
             ipmaEntries.Add(Concat(U16(2), new[] { (byte)e2.Count }, e2.ToArray()));
         }
@@ -168,22 +198,55 @@ internal static class HeicEncoder
 
         byte[] hdlr = FullBox("hdlr", 0, 0, Concat(U32(0), Fourcc("pict"), U32(0), U32(0), U32(0), new byte[] { 0 }));
         byte[] pitm = FullBox("pitm", 0, 0, U16(1));
-        // iinf { infe (item 1, hvc1)[, infe (item 2, hvc1, hidden)] }
-        byte[] infe1 = FullBox("infe", 2, 0, Concat(U16(1), U16(0), Fourcc("hvc1"), new byte[] { 0 }));
-        byte[] iinf = hasAlpha
-            ? FullBox("iinf", 0, 0, Concat(U16(2), infe1, FullBox("infe", 2, 1, Concat(U16(2), U16(0), Fourcc("hvc1"), new byte[] { 0 }))))
-            : FullBox("iinf", 0, 0, Concat(U16(1), infe1));
-        // iref: item 2 is the alpha auxiliary image of item 1
-        byte[] iref = hasAlpha ? FullBox("iref", 0, 0, Box("auxl", Concat(U16(2), U16(1), U16(1)))) : Array.Empty<byte>();
 
-        byte[] mdatPayload = hasAlpha ? Concat(sample, alphaSample!) : sample;
+        // Items in mdat order: 1 = image, [2 = alpha,] then the metadata items (as libheif adds them): Exif (data
+        // preceded by the 4-byte offset of its TIFF header) and XMP ('mime', application/rdf+xml).
+        var itemData = new List<(int Id, byte[] Data)> { (1, sample) };
+        // iinf { infe (item 1, hvc1)[, infe (item 2, hvc1, hidden)][, infe Exif][, infe mime] }
+        var infes = new List<byte[]> { FullBox("infe", 2, 0, Concat(U16(1), U16(0), Fourcc("hvc1"), new byte[] { 0 })) };
+        // iref: item 2 is the alpha auxiliary image of item 1; the metadata items describe item 1
+        var refs = new List<byte[]>();
+        if (hasAlpha)
+        {
+            itemData.Add((2, alphaSample!));
+            infes.Add(FullBox("infe", 2, 1, Concat(U16(2), U16(0), Fourcc("hvc1"), new byte[] { 0 })));
+            refs.Add(Box("auxl", Concat(U16(2), U16(1), U16(1))));
+        }
+
+        if (exif != null)
+        {
+            int id = itemData.Count + 1;
+            itemData.Add((id, Concat(U32(0), exif)));
+            infes.Add(FullBox("infe", 2, 0, Concat(U16(id), U16(0), Fourcc("Exif"), new byte[] { 0 })));
+            refs.Add(Box("cdsc", Concat(U16(id), U16(1), U16(1))));
+        }
+
+        if (xmp != null)
+        {
+            int id = itemData.Count + 1;
+            itemData.Add((id, xmp));
+            infes.Add(FullBox("infe", 2, 0, Concat(U16(id), U16(0), Fourcc("mime"), new byte[] { 0 },
+                System.Text.Encoding.ASCII.GetBytes("application/rdf+xml"), new byte[] { 0 })));
+            refs.Add(Box("cdsc", Concat(U16(id), U16(1), U16(1))));
+        }
+
+        byte[] iinf = FullBox("iinf", 0, 0, Concat(U16(infes.Count), Concat(infes.ToArray())));
+        byte[] iref = refs.Count > 0 ? FullBox("iref", 0, 0, Concat(refs.ToArray())) : Array.Empty<byte>();
+
+        byte[] mdatPayload = Concat(itemData.Select(i => i.Data).ToArray());
 
         // iloc (version 1, offset_size 4, length_size 4, no base offset): one extent per item in mdat. The meta size
         // does not depend on the offsets, so lay it out once with zeros, then again with the real offsets.
         byte[] BuildMeta(uint dataOffset)
         {
-            var items = new List<byte[]> { IlocItem(1, dataOffset, (uint)sample.Length) };
-            if (hasAlpha) items.Add(IlocItem(2, dataOffset + (uint)sample.Length, (uint)alphaSample!.Length));
+            var items = new List<byte[]>();
+            uint offset = dataOffset;
+            foreach (var (id, data) in itemData)
+            {
+                items.Add(IlocItem(id, offset, (uint)data.Length));
+                offset += (uint)data.Length;
+            }
+
             byte[] iloc = FullBox("iloc", 1, 0, Concat(new byte[] { 0x44, 0x00 }, U16(items.Count), Concat(items.ToArray())));
             return FullBox("meta", 0, 0, Concat(hdlr, pitm, iinf, iref, iprp, iloc));
         }

@@ -1,6 +1,7 @@
 using SharpImage.Compression;
 using SharpImage.Core;
 using SharpImage.Image;
+using SharpImage.Metadata;
 using System.Buffers;
 using System.IO.Compression;
 using System.Runtime.CompilerServices;
@@ -54,6 +55,10 @@ public static class TiffCoder
     private const ushort TagColorMap = 320;
     private const ushort TagExtraSamples = 338;
     private const ushort TagSampleFormat = 339;
+    private const ushort TagXmp = 700;
+    private const ushort TagExifIfd = 34665;
+    private const ushort TagGpsIfd = 34853;
+    private const ushort TagIccProfile = 34675;
 
     // Tile tags
     private const ushort TagTileWidth = 322;
@@ -171,7 +176,9 @@ public static class TiffCoder
         while (ifdOffset > 0 && ifdOffset < fileData.Length && pages.Count < maxPages)
         {
             var (tags, nextIfdOffset) = ParseIfd(fileData, ifdOffset, bigEndian, isBigTiff);
-            pages.Add(DecodeIfdToFrame(fileData, tags, bigEndian));
+            var page = DecodeIfdToFrame(fileData, tags, bigEndian);
+            ReadPageMetadata(fileData, tags, page, firstPage: pages.Count == 0 && !isBigTiff);
+            pages.Add(page);
             ifdOffset = nextIfdOffset;
         }
 
@@ -179,6 +186,43 @@ public static class TiffCoder
             throw new InvalidDataException("TIFF file contains no valid IFDs.");
 
         return pages;
+    }
+
+    // IFD0 tags that describe the image rather than its storage, kept in the EXIF profile.
+    private static readonly HashSet<ushort> DescriptiveTags = [269, 270, 271, 272, 274, 285, 305, 306, 315, 316, 33432];
+
+    /// <summary>A page's ICC profile, XMP packet and (first page) EXIF / GPS tags into its metadata.</summary>
+    private static void ReadPageMetadata(byte[] fileData, Dictionary<ushort, TiffTag> tags, ImageFrame page, bool firstPage)
+    {
+        if (tags.TryGetValue(TagIccProfile, out var icc) && icc.Count > 0)
+        {
+            page.Metadata.IccProfile = new IccProfile(Array.ConvertAll(icc.Values, v => (byte)v));
+        }
+
+        if (tags.TryGetValue(TagXmp, out var xmp) && xmp.Count > 0)
+        {
+            page.Metadata.Xmp = System.Text.Encoding.UTF8.GetString(Array.ConvertAll(xmp.Values, v => (byte)v)).TrimEnd('\0');
+        }
+
+        if (!firstPage)
+        {
+            return;
+        }
+
+        // The file's IFD0 is this page: its descriptive tags and the EXIF / GPS sub-IFDs, without the storage tags
+        // (the profile is rebuilt from the tags when written elsewhere).
+        if (ExifParser.ParseFromTiff(fileData) is { } exif)
+        {
+            exif.RawData = null;
+            exif.Ifd0Tags.RemoveAll(e => !DescriptiveTags.Contains(e.Tag));
+            exif.ExifTags.RemoveAll(e => e.Tag == 0xA005);   // interoperability IFD pointer: not carried
+            if (exif.Ifd0Tags.Count + exif.ExifTags.Count + exif.GpsTags.Count > 0)
+            {
+                page.Metadata.ExifProfile = exif;
+                if (ExifParser.OrientationOf(exif) is not OrientationType.Undefined and var orientation)
+                    page.Orientation = orientation;
+            }
+        }
     }
 
     private static ImageFrame DecodeIfdToFrame(byte[] fileData, Dictionary<ushort, TiffTag> tags, bool bigEndian)
@@ -209,8 +253,9 @@ public static class TiffCoder
         if (isGrayscale && samplesPerPixel >= 2) hasAlpha = true;
 
         var image = new ImageFrame();
+        // gray is expanded to RGB (as the other readers do); gray + alpha keeps its alpha
         image.Initialize(width, height, ColorspaceType.SRGB,
-            hasAlpha && !isGrayscale && samplesPerPixel > 3);
+            isGrayscale ? samplesPerPixel >= 2 : hasAlpha && samplesPerPixel > 3);
         int channels = image.NumberOfChannels;
 
         // Check for tile-based layout
@@ -348,11 +393,10 @@ public static class TiffCoder
         if (dataOffset % 2 != 0) dataOffset++;
         int ifdOffset = dataOffset;
 
-        var tagList = BuildCommonTags(width, height, channels, hasAlpha, bitsPerSample, compression);
+        var tagList = BuildCommonTags(image, width, height, channels, hasAlpha, bitsPerSample, compression);
         tagList.Add(MakeTagArray(TagStripOffsets, TypeLong, stripOffsets));
         tagList.Add(MakeTag(TagRowsPerStrip, TypeLong, rowsPerStrip));
         tagList.Add(MakeTagArray(TagStripByteCounts, TypeLong, stripByteCounts));
-        tagList.Sort((a, b) => a.Tag.CompareTo(b.Tag));
 
         using var writer = new BinaryWriter(stream, System.Text.Encoding.UTF8, leaveOpen: true);
         writer.Write((byte)0x49);
@@ -365,6 +409,9 @@ public static class TiffCoder
         if ((int)stream.Position % 2 != 0)
             writer.Write((byte)0);
 
+        WriteExifSubIfds(writer, image, tagList);
+        PatchUInt32(writer, 4, (uint)stream.Position);
+        tagList.Sort((a, b) => a.Tag.CompareTo(b.Tag));
         WriteIfd(writer, tagList, (int)stream.Position);
     }
 
@@ -431,12 +478,11 @@ public static class TiffCoder
         if (dataOffset % 2 != 0) dataOffset++;
         int ifdOffset = dataOffset;
 
-        var tagList = BuildCommonTags(width, height, channels, hasAlpha, bitsPerSample, compression);
+        var tagList = BuildCommonTags(image, width, height, channels, hasAlpha, bitsPerSample, compression);
         tagList.Add(MakeTag(TagTileWidth, TypeLong, tileWidth));
         tagList.Add(MakeTag(TagTileLength, TypeLong, tileLength));
         tagList.Add(MakeTagArray(TagTileOffsets, TypeLong, tileOffsets));
         tagList.Add(MakeTagArray(TagTileByteCounts, TypeLong, tileByteCounts));
-        tagList.Sort((a, b) => a.Tag.CompareTo(b.Tag));
 
         using var writer = new BinaryWriter(stream, System.Text.Encoding.UTF8, leaveOpen: true);
         writer.Write((byte)0x49);
@@ -449,6 +495,9 @@ public static class TiffCoder
         if ((int)stream.Position % 2 != 0)
             writer.Write((byte)0);
 
+        WriteExifSubIfds(writer, image, tagList);
+        PatchUInt32(writer, 4, (uint)stream.Position);
+        tagList.Sort((a, b) => a.Tag.CompareTo(b.Tag));
         WriteIfd(writer, tagList, (int)stream.Position);
     }
 
@@ -497,7 +546,7 @@ public static class TiffCoder
                 compressedStrips[stripIdx++] = CompressStrip(rawData, compression);
             }
 
-            var tags = BuildCommonTags(width, height, channels, hasAlpha, bitsPerSample, compression);
+            var tags = BuildCommonTags(image, width, height, channels, hasAlpha, bitsPerSample, compression);
             tags.Add(MakeTag(TagRowsPerStrip, TypeLong, rowsPerStrip));
             pageDataList.Add((compressedStrips, new int[stripCount], new int[stripCount], tags, rowsPerStrip));
         }
@@ -549,9 +598,16 @@ public static class TiffCoder
             var pd = pageDataList[p];
             pd.tags.Add(MakeTagArray(TagStripOffsets, TypeLong, pd.offsets));
             pd.tags.Add(MakeTagArray(TagStripByteCounts, TypeLong, pd.byteCounts));
-            pd.tags.Sort((a, b) => a.Tag.CompareTo(b.Tag));
 
             if ((int)stream.Position % 2 != 0) writer.Write((byte)0);
+            if (p == 0)
+            {
+                // The EXIF / GPS sub-IFDs of the first page (IFD0), before it
+                WriteExifSubIfds(writer, pages[0], pd.tags);
+                PatchUInt32(writer, firstIfdOffsetPos, (uint)stream.Position);
+            }
+
+            pd.tags.Sort((a, b) => a.Tag.CompareTo(b.Tag));
 
             // Patch previous IFD's "next" pointer to this IFD's position
             if (prevNextIfdPos >= 0)
@@ -578,7 +634,7 @@ public static class TiffCoder
         WriteMultiPage(pages, stream, compression);
     }
 
-    private static List<TiffTagEntry> BuildCommonTags(int width, int height, int channels,
+    private static List<TiffTagEntry> BuildCommonTags(ImageFrame image, int width, int height, int channels,
         bool hasAlpha, int bitsPerSample, TiffCompression compression)
     {
         int compValue = compression switch
@@ -597,7 +653,7 @@ public static class TiffCoder
             MakeTagArray(TagBitsPerSample, TypeShort,
                 Enumerable.Repeat(bitsPerSample, channels).ToArray()),
             MakeTag(TagCompression, TypeShort, compValue),
-            MakeTag(TagPhotometric, TypeShort, PhotometricRgb),
+            MakeTag(TagPhotometric, TypeShort, channels - (hasAlpha ? 1 : 0) == 1 ? PhotometricMinIsBlack : PhotometricRgb),
             MakeTag(TagSamplesPerPixel, TypeShort, channels),
             MakeTag(TagXResolution, TypeRational, 72, 1),
             MakeTag(TagYResolution, TypeRational, 72, 1),
@@ -609,7 +665,76 @@ public static class TiffCoder
         if (hasAlpha)
             tagList.Add(MakeTag(TagExtraSamples, TypeShort, 2));
 
+        // The samples' colour (the image's ICC profile, or libjxl's for its colour space), XMP and the descriptive
+        // IFD0 tags of its EXIF profile (Make, Model, Orientation ...).
+        if (ColorDescription.Resolve(image).Icc is { } icc)
+            tagList.Add(MakeTagBytes(TagIccProfile, TypeUndefined, icc));
+        if (image.Metadata.Xmp is { } xmp)
+            tagList.Add(MakeTagBytes(TagXmp, TypeByte, System.Text.Encoding.UTF8.GetBytes(xmp)));
+        if (image.Metadata.ExifProfile is { } exif)
+        {
+            foreach (var e in exif.Ifd0Tags)
+            {
+                if (DescriptiveTags.Contains(e.Tag) && !tagList.Exists(t => t.Tag == e.Tag))
+                    tagList.Add(ExifEntryToTag(e, exif.IsLittleEndian));
+            }
+        }
+
         return tagList;
+    }
+
+    /// <summary>
+    /// Writes the EXIF and GPS sub-IFDs of the image's EXIF profile at the stream's position and adds their pointer
+    /// tags to the IFD that refers to them.
+    /// </summary>
+    private static void WriteExifSubIfds(BinaryWriter writer, ImageFrame image, List<TiffTagEntry> ifdTags)
+    {
+        if (image.Metadata.ExifProfile is not { } exif)
+            return;
+
+        foreach (var (entries, pointerTag) in new[] { (exif.ExifTags, TagExifIfd), (exif.GpsTags, TagGpsIfd) })
+        {
+            // the interoperability IFD pointer would point into the source file: not carried
+            var subTags = entries.Where(e => e.Tag != 0xA005).Select(e => ExifEntryToTag(e, exif.IsLittleEndian))
+                .GroupBy(t => t.Tag).Select(g => g.First()).OrderBy(t => t.Tag).ToList();
+            if (subTags.Count == 0)
+                continue;
+
+            if (writer.BaseStream.Position % 2 != 0) writer.Write((byte)0);
+            int start = (int)writer.BaseStream.Position;
+            WriteIfd(writer, subTags, start);
+            ifdTags.Add(MakeTag(pointerTag, TypeLong, start));
+        }
+
+        if (writer.BaseStream.Position % 2 != 0) writer.Write((byte)0);
+    }
+
+    // An EXIF entry as a little-endian TIFF tag (its value bytes swapped from a big-endian profile).
+    private static TiffTagEntry ExifEntryToTag(ExifEntry e, bool littleEndian)
+    {
+        byte[] value = (byte[])(e.Value ?? []).Clone();
+        int unit = (ushort)e.DataType switch
+        {
+            TypeShort or TypeSshort => 2,
+            TypeLong or TypeSlong or TypeFloat or TypeRational or TypeSrational => 4,
+            TypeDouble => 8,
+            _ => 1,
+        };
+        if (!littleEndian && unit > 1)
+        {
+            for (int i = 0; i + unit <= value.Length; i += unit)
+                Array.Reverse(value, i, unit);
+        }
+
+        return new TiffTagEntry(e.Tag, (ushort)e.DataType, (int)e.Count, [], value);
+    }
+
+    private static void PatchUInt32(BinaryWriter writer, long position, uint value)
+    {
+        long saved = writer.BaseStream.Position;
+        writer.BaseStream.Position = position;
+        writer.Write(value);
+        writer.BaseStream.Position = saved;
     }
 
     #endregion
@@ -1411,13 +1536,14 @@ public static class TiffCoder
             writer.Write(tag.Type);
             writer.Write((uint)tag.Count);
 
-            int valueSize = GetTypeSize(tag.Type) * tag.Count;
+            int valueSize = tag.Raw?.Length ?? GetTypeSize(tag.Type) * tag.Count;
             if (valueSize <= 4)
                 WriteTagValueInline(writer, tag);
             else
             {
                 writer.Write((uint)(extraDataOffset + extraData.Position));
                 WriteTagExtraData(extraData, tag);
+                if (extraData.Position % 2 != 0) extraData.WriteByte(0);   // values start on word boundaries
             }
         }
 
@@ -1434,7 +1560,11 @@ public static class TiffCoder
         using var ms = new MemoryStream(4);
         using var tw = new BinaryWriter(ms);
 
-        if (tag.Type == TypeShort)
+        if (tag.Raw != null)
+        {
+            tw.Write(tag.Raw);
+        }
+        else if (tag.Type == TypeShort)
         {
             for (int i = 0;i < tag.Count && i < 2;i++)
             {
@@ -1467,7 +1597,11 @@ public static class TiffCoder
     {
         using var tw = new BinaryWriter(output, System.Text.Encoding.UTF8, leaveOpen: true);
 
-        if (tag.Type == TypeShort)
+        if (tag.Raw != null)
+        {
+            tw.Write(tag.Raw);
+        }
+        else if (tag.Type == TypeShort)
         {
             foreach (int v in tag.Values)
             {
@@ -1500,6 +1634,9 @@ public static class TiffCoder
 
     private static TiffTagEntry MakeTagArray(ushort tag, ushort type, int[] values)
         => new(tag, type, values.Length, values);
+
+    private static TiffTagEntry MakeTagBytes(ushort tag, ushort type, byte[] bytes)
+        => new(tag, type, bytes.Length, [], bytes);
 
     #endregion
 
@@ -1564,4 +1701,4 @@ internal readonly record struct TiffTag(ushort Id, ushort Type, int Count, int[]
 /// <summary>
 /// Internal TIFF tag entry for writing.
 /// </summary>
-internal readonly record struct TiffTagEntry(ushort Tag, ushort Type, int Count, int[] Values);
+internal readonly record struct TiffTagEntry(ushort Tag, ushort Type, int Count, int[] Values, byte[]? Raw = null);

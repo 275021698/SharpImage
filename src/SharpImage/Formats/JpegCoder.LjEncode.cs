@@ -488,7 +488,8 @@ public static partial class JpegCoder
                     outp.Write(xmpData);
                 }
             }
-            if ((o.IccProfile ?? md?.IccProfile?.Data) is { Length: > 0 } icc)
+            // The image's profile, or (for a non-sRGB colour space / CICP tags) libjxl's profile for its encoding.
+            if ((o.IccProfile ?? (md != null ? ColorDescription.Resolve(img).Icc : null)) is { Length: > 0 } icc)
             {
                 const int maxData = 65533 - 14;
                 int count = DivUp(icc.Length, maxData);

@@ -1026,11 +1026,7 @@ public static partial class HeifCoder
             frame.Colorspace = src.Colorspace;
         }
         frame.Orientation = OrientationType.TopLeft;
-        if (frame.Metadata.ExifProfile is { } exif && exif.GetTag(SharpImage.Metadata.ExifTag.Orientation) is { } ot)
-        {
-            byte[] one = exif.IsLittleEndian ? [1, 0] : [0, 1];
-            exif.SetTag(new SharpImage.Metadata.ExifEntry { Tag = ot.Tag, DataType = SharpImage.Metadata.ExifDataType.Short, Count = 1, Value = one });
-        }
+        SharpImage.Metadata.ExifParser.ResetOrientation(frame.Metadata.ExifProfile);
         return frame;
     }
 
@@ -1114,7 +1110,15 @@ public static partial class HeifCoder
             }
         }
 
-        return Hevc.HeicEncoder.Encode(rgb, w, h, outCh, Math.Clamp(qp, 0, 51), signDataHiding: true);
+        // The samples' colour: colr nclx from CICP tags (the image's, or its colour space's) and colr prof from the
+        // image's ICC profile (or libjxl's for a colour space without code points).
+        (byte[]? icc, SharpImage.Metadata.CicpInfo? cicp) = ColorDescription.Resolve(image);
+        icc = ColorDescription.ResolveRgbIcc(image, out _);   // HEIC stores RGB: a gray profile as its RGB equivalent
+        int cp = cicp?.ColorPrimaries ?? (icc != null ? 2 : 1), tc = cicp?.TransferCharacteristics ?? (icc != null ? 2 : 13);
+        byte[]? exif = image.Metadata.ExifProfile is { } e ? SharpImage.Metadata.ExifParser.SerializeForPngExif(e) : null;
+        byte[]? xmp = image.Metadata.Xmp is { } xmpText ? System.Text.Encoding.UTF8.GetBytes(xmpText) : null;
+        (int? irot, int? imir) = OrientationToIrotImir(image.Orientation);
+        return Hevc.HeicEncoder.Encode(rgb, w, h, outCh, Math.Clamp(qp, 0, 51), signDataHiding: true, cp, tc, icc, exif, xmp, irot, imir);
     }
 
     // AVIF encode via the from-scratch AV1 intra encoder. Current scope: grayscale, up to one 64x64 superblock.
@@ -2015,6 +2019,20 @@ public static partial class HeifCoder
     // form libavif stores after its 4-byte header offset) and XMP (mime item, application/rdf+xml).
     // Transforms: irot/imir from the options, else from the EXIF-style Orientation (libavif
     // avifImageExtractExifOrientationToIrotImir); clap from CropRect; pasp from the options or metadata.
+    // EXIF-style orientation as HEIF irot (anti-clockwise quarter turns) + imir (0 = top/bottom, 1 = left/right),
+    // libavif's avifImageExtractExifOrientationToIrotImir.
+    internal static (int? Irot, int? Imir) OrientationToIrotImir(OrientationType orientation) => orientation switch
+    {
+        OrientationType.TopRight => ((int?)null, (int?)1),
+        OrientationType.BottomRight => (2, null),
+        OrientationType.BottomLeft => (null, 0),
+        OrientationType.LeftTop => (1, 0),
+        OrientationType.RightTop => (3, null),
+        OrientationType.RightBottom => (3, 0),
+        OrientationType.LeftBottom => (1, null),
+        _ => (null, null),
+    };
+
     private static Av1.AvifContainerExtras AvifExtras(ImageFrame image, AvifEncodeOptions o)
     {
         var x = new Av1.AvifContainerExtras
@@ -2023,17 +2041,7 @@ public static partial class HeifCoder
             Exif = !t_targetSizeSearch && image.Metadata.ExifProfile is { } exif ? SharpImage.Metadata.ExifParser.SerializeForPngExif(exif) : null,
             Xmp = !t_targetSizeSearch && image.Metadata.Xmp is { Length: > 0 } xmp ? Encoding.UTF8.GetBytes(xmp) : null,
         };
-        (int? irot, int? imir) = image.Orientation switch
-        {
-            OrientationType.TopRight => ((int?)null, (int?)1),
-            OrientationType.BottomRight => (2, null),
-            OrientationType.BottomLeft => (null, 0),
-            OrientationType.LeftTop => (1, 0),
-            OrientationType.RightTop => (3, null),
-            OrientationType.RightBottom => (3, 0),
-            OrientationType.LeftBottom => (1, null),
-            _ => (null, null),
-        };
+        (int? irot, int? imir) = OrientationToIrotImir(image.Orientation);
         if (o.Rotation != null || o.Mirror != null) (irot, imir) = (o.Rotation, o.Mirror);
         if (irot is < 0 or > 3) throw new ArgumentOutOfRangeException(nameof(o), "Rotation must be 0..3 quarter turns.");
         if (imir is < 0 or > 1) throw new ArgumentOutOfRangeException(nameof(o), "Mirror axis must be 0 or 1.");
@@ -2097,18 +2105,27 @@ public static partial class HeifCoder
     private static byte[]? AvifIcc(ImageFrame image, AvifEncodeOptions o)
     {
         if (t_targetSizeSearch) return null;
-        byte[]? icc = image.Metadata.IccProfile?.Data ?? image.IccProfile;
+        // The image's profile, or libjxl's for a colour space that has no CICP code points (Adobe RGB ...).
+        byte[]? icc = image.IccProfile;
+        if (icc == null && image.Metadata.Cicp == null && ColorDescription.Resolve(image) is { Cicp: null } d)
+        {
+            icc = d.Icc;
+        }
+
         if (icc is not { Length: >= 20 }) return icc;
         bool grayIcc = icc[16] == 'G' && icc[17] == 'R' && icc[18] == 'A' && icc[19] == 'Y';   // header data colour space
         bool grayOut = o.ChromaSubsampling == AvifChromaSubsampling.Yuv400;
+        // gray content coded as YUV: the gray profile's RGB equivalent (same curve and white point)
+        if (grayIcc && !grayOut) return ColorDescription.ResolveRgbIcc(image, out _);
         return grayIcc == grayOut ? icc : null;
     }
 
     // CICP for an AVIF encode, validated against what libavif can represent (reformat.c avifGetYUVColorSpaceInfo).
     private static Av1.Av1ObuWriter.Av1ColorDesc ResolveAvifColor(ImageFrame image, AvifEncodeOptions o, int bd)
     {
-        var meta = image.Metadata.Cicp;
         bool hasIcc = AvifIcc(image, o) != null;
+        // The image's CICP tags, or its colour space's (Display P3, linear ...), unless a profile describes it.
+        var meta = image.Metadata.Cicp ?? (image.IccProfile == null ? ColorDescription.Resolve(image).Cicp : null);
         int cp = o.ColorPrimaries ?? meta?.ColorPrimaries ?? (hasIcc ? 2 : 1);
         int tc = o.TransferCharacteristics ?? meta?.TransferCharacteristics ?? (hasIcc ? 2 : 13);
         int mc = o.MatrixCoefficients ?? (meta?.MatrixCoefficients is 1 or 4 or 5 or 6 or 7 or 9 or 12 ? meta.MatrixCoefficients : 6);

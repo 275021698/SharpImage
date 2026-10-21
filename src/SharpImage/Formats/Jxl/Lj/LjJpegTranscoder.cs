@@ -289,7 +289,7 @@ internal static class LjJpegTranscoder
         return current;
     }
 
-    private static void WriteBoxHeader(Stream o, string type, long contentSize, bool large)
+    internal static void WriteBoxHeader(Stream o, string type, long contentSize, bool large)
     {
         if (large)
         {
@@ -309,7 +309,7 @@ internal static class LjJpegTranscoder
         }
     }
 
-    private static void WriteBox(Stream o, string type, ReadOnlySpan<byte> content)
+    internal static void WriteBox(Stream o, string type, ReadOnlySpan<byte> content)
     {
         WriteBoxHeader(o, type, content.Length, false);
         o.Write(content);
@@ -327,7 +327,7 @@ internal static class LjJpegTranscoder
         o.Write(content);
     }
 
-    private static void WriteBrob(Stream o, string type, byte[] content)
+    internal static void WriteBrob(Stream o, string type, byte[] content)
     {
         byte[] compressed = LjBrotli.CompressStream([content], BrotliEffort, 22);
         var payload = new byte[4 + compressed.Length];

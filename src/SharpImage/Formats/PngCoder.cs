@@ -33,6 +33,7 @@ public static class PngCoder
     private const uint ChunkpHYs = 0x70485973;
     private const uint ChunksRGB = 0x73524742;
     private const uint ChunkiCCP = 0x69434350; // ICC profile
+    private const uint ChunkcICP = 0x63494350; // coding-independent code points (H.273)
     private const uint ChunktEXt = 0x74455874; // Text metadata
     private const uint ChunkiTXt = 0x69545874; // International text
     private const uint ChunkeXIf = 0x65584966; // EXIF data
@@ -86,6 +87,8 @@ public static class PngCoder
 
         // Metadata collected from chunks
         byte[]? iccProfileData = null;
+        CicpInfo? cicp = null;
+        int? renderingIntent = null;
         byte[]? exifChunkData = null;
         Dictionary<string, string>? textEntries = null;
 
@@ -232,6 +235,20 @@ public static class PngCoder
                     iccProfileData = iccDecompressed.ToArray();
                 }
             }
+            else if (chunkType == ChunksRGB && dataLength == 1)
+            {
+                byte[] srgbData = new byte[1];
+                ReadExact(stream, srgbData);
+                VerifyChunkCrc(stream, chunkHeader[4..], srgbData, crcBuf);
+                renderingIntent = srgbData[0] <= 3 ? srgbData[0] : null;
+            }
+            else if (chunkType == ChunkcICP && dataLength == 4)
+            {
+                byte[] cicpData = new byte[4];
+                ReadExact(stream, cicpData);
+                VerifyChunkCrc(stream, chunkHeader[4..], cicpData, crcBuf);
+                cicp = new CicpInfo(cicpData[0], cicpData[1], cicpData[2], cicpData[3] != 0);
+            }
             else if (chunkType == ChunktEXt)
             {
                 byte[] textData = new byte[dataLength];
@@ -331,12 +348,21 @@ public static class PngCoder
             throw new NotSupportedException($"Unknown PNG interlace method {interlaceMethod} (expected 0 or 1).");
         }
 
-        // Attach collected metadata
+        // Attach collected metadata (cICP describes RGB samples only: matrix coefficients 0)
         if (iccProfileData is not null)
             image.Metadata.IccProfile = new IccProfile(iccProfileData);
 
+        if (cicp is { MatrixCoefficients: 0 })
+            image.Metadata.Cicp = cicp;
+
+        image.Metadata.RenderingIntent = renderingIntent;
+
         if (exifChunkData is not null)
+        {
             image.Metadata.ExifProfile = ExifParser.ParseFromTiff(exifChunkData);
+            if (ExifParser.OrientationOf(image.Metadata.ExifProfile) is not OrientationType.Undefined and var orientation)
+                image.Orientation = orientation;
+        }
 
         if (textEntries is not null)
         {
@@ -608,6 +634,7 @@ public static class PngCoder
         ihdr[8] = bitDepth;
         ihdr[9] = colorType;
         WriteChunk(stream, "IHDR"u8, ihdr);
+        WriteColorChunks(stream, frames[0], rgb: true);
 
         // Write acTL (Animation Control) — must come before IDAT
         byte[] actl = new byte[8];
@@ -1252,12 +1279,13 @@ public static class PngCoder
         int height = (int)image.Rows;
         bool hasAlpha = image.HasAlpha;
 
-        // Determine output format
-        byte colorType = hasAlpha ? ColorTypeRgba : ColorTypeRgb;
+        // Determine output format: a gray frame (one colour channel) stays gray, as libpng / djxl write it.
+        bool gray = image.NumberOfChannels - (hasAlpha ? 1 : 0) == 1;
+        byte colorType = gray ? (hasAlpha ? ColorTypeGrayscaleAlpha : ColorTypeGrayscale) : hasAlpha ? ColorTypeRgba : ColorTypeRgb;
         // 16-bit when any sample is not an exact 8-bit value (16-bit sources stay 16-bit), else 8-bit.
         bool deep = NeedsSixteenBits(image);
         byte bitDepth = deep ? (byte)16 : (byte)8;
-        int outputChannels = hasAlpha ? 4 : 3;
+        int outputChannels = (gray ? 1 : 3) + (hasAlpha ? 1 : 0);
         int bytesPerPixel = outputChannels * (deep ? 2 : 1);
         int rawBytesPerRow = width * bytesPerPixel;
 
@@ -1275,15 +1303,8 @@ public static class PngCoder
         ihdr[12] = 0; // Interlace method (none)
         WriteChunk(stream, "IHDR"u8, ihdr);
 
-        // Write sRGB chunk (rendering intent = perceptual)
-        WriteChunk(stream, "sRGB"u8, [ 0 ]);
-
-        // Write gAMA chunk (1/2.2 = 45455 in PNG units)
-        byte[] gamaData = new byte[4];
-        WriteUInt32BigEndian(gamaData, 45455);
-        WriteChunk(stream, "gAMA"u8, gamaData);
-
-        // Write metadata chunks (before IDAT per PNG spec)
+        // Colour chunks, then metadata chunks (before IDAT per PNG spec)
+        WriteColorChunks(stream, image, rgb: !gray);
         WriteMetadataChunks(stream, image);
 
         // Compress and write IDAT
@@ -1373,6 +1394,23 @@ public static class PngCoder
     private static void ConvertPixelRowToBytes16(ReadOnlySpan<ushort> pixelRow, Span<byte> output, int width, int outputChannels)
     {
         int srcChannels = pixelRow.Length / width;
+        if (outputChannels <= 2)
+        {
+            // gray (+ alpha) from a gray frame
+            for (int x = 0; x < width; x++)
+            {
+                int s = x * srcChannels, d = x * outputChannels * 2;
+                for (int c = 0; c < outputChannels; c++)
+                {
+                    ushort v = pixelRow[s + c];
+                    output[d + 2 * c] = (byte)(v >> 8);
+                    output[d + 2 * c + 1] = (byte)v;
+                }
+            }
+
+            return;
+        }
+
         for (int x = 0; x < width; x++)
         {
             int s = x * srcChannels, d = x * outputChannels * 2;
@@ -1396,6 +1434,14 @@ public static class PngCoder
         int width, int outputChannels)
     {
         int srcChannels = pixelRow.Length / width;
+        if (outputChannels <= 2)
+        {
+            // gray (+ alpha) from a gray frame
+            for (int i = 0; i < width * outputChannels; i++)
+                output[i] = Quantum.ScaleToByte(pixelRow[i]);
+            return;
+        }
+
         for (int x = 0;x < width;x++)
         {
             int srcOffset = x * srcChannels;
@@ -1578,12 +1624,45 @@ public static class PngCoder
     }
 
     /// <summary>
-    /// Writes metadata chunks (iCCP, eXIf, tEXt) for an image.
+    /// Writes the colour chunks of an image, as djxl's PNG writer does: sRGB + gAMA for sRGB samples, otherwise cICP
+    /// (when H.273 has code points for the encoding) and iCCP (the image's profile, or libjxl's for its encoding).
     /// </summary>
-    private static void WriteMetadataChunks(Stream stream, ImageFrame image)
+    private static void WriteColorChunks(Stream stream, ImageFrame image, bool rgb)
     {
-        // ICC Profile → iCCP chunk (compressed)
-        if (image.Metadata.IccProfile is not null)
+        // RGB samples need an RGB profile (a gray one becomes its RGB equivalent); gray samples keep theirs
+        (byte[]? icc, CicpInfo? cicp) = ColorDescription.Resolve(image);
+        if (rgb)
+            icc = ColorDescription.ResolveRgbIcc(image, out _);
+
+        // djxl's chunks (MaybeAddSRGB / MaybeAddCICP / iCCP / MaybeAddCHRM / MaybeAddGAMA), in libpng's order. An
+        // enumerated encoding (CICP tags, a colour space, or libjxl's own profile for one) is described by its
+        // fields too; an ICC profile of the image's own goes alone, byte for byte.
+        static void Fixed(Span<byte> d, double v) => WriteUInt32BigEndian(d, (uint)Math.Floor((v * 100000) + 0.5));
+        Jxl.Lj.LjColorEncoding? enumEnc = ColorDescription.EnumEncoding(image);
+        bool ownProfile = image.IccProfile is { Length: > 0 } && enumEnc == null;
+        if (!ownProfile && (enumEnc == null || ColorDescription.IsSrgbEncoding(enumEnc)))
+        {
+            WriteChunk(stream, "sRGB"u8, [(byte)(image.Metadata.RenderingIntent ?? 0)]);
+            byte[] gamaData = new byte[4];
+            WriteUInt32BigEndian(gamaData, 45455); // 1/2.2 in PNG units
+            WriteChunk(stream, "gAMA"u8, gamaData);
+            byte[] chrm = new byte[32];
+            uint[] srgbChrm = [31270, 32900, 64000, 33000, 30000, 60000, 15000, 6000];
+            for (int i = 0; i < 8; i++) WriteUInt32BigEndian(chrm.AsSpan(i * 4), srgbChrm[i]);
+            WriteChunk(stream, "cHRM"u8, chrm);
+            return;
+        }
+
+        Jxl.Lj.LjExtEncoding? ext = enumEnc != null ? Jxl.Lj.LjCms.ToExternal(enumEnc) : null;
+
+        // cICP describes RGB samples only (H.273 has no gray primaries)
+        cicp ??= enumEnc != null ? ColorDescription.CicpOf(enumEnc) : null;
+        if (rgb && cicp is { MatrixCoefficients: 0 } && cicp.ColorPrimaries != 2)
+        {
+            WriteChunk(stream, "cICP"u8, [(byte)cicp.ColorPrimaries, (byte)cicp.TransferCharacteristics, 0, (byte)(cicp.FullRange ? 1 : 0)]);
+        }
+
+        if (icc != null)
         {
             using var ms = new MemoryStream();
             // Keyword: "ICC Profile\0" + compression method (0 = zlib)
@@ -1594,12 +1673,45 @@ public static class PngCoder
             using var compMs = new MemoryStream();
             using (var deflate = new ZLibStream(compMs, CompressionLevel.Optimal, leaveOpen: true))
             {
-                deflate.Write(image.Metadata.IccProfile.Data);
+                deflate.Write(icc);
             }
             ms.Write(compMs.ToArray());
 
             WriteChunk(stream, "iCCP"u8, ms.ToArray());
         }
+
+        // gAMA for linear / sRGB / gamma curves, cHRM for RGB.
+        if (ext != null)
+        {
+            double? gamma = ext.TransferFunction switch
+            {
+                8 => 1.0,
+                13 => 0.45455,
+                Jxl.Lj.LjExtEncoding.TfGamma => ext.Gamma,
+                _ => null,
+            };
+            if (gamma is { } g)
+            {
+                byte[] gamaData = new byte[4];
+                Fixed(gamaData, g);
+                WriteChunk(stream, "gAMA"u8, gamaData);
+            }
+        }
+
+        if (rgb && ext is { ColorSpace: Jxl.Lj.LjColorEncoding.CsRgb, Primaries: not 0 })
+        {
+            byte[] chrm = new byte[32];
+            double[] xy = [ext.Wx, ext.Wy, ext.Rx, ext.Ry, ext.Gx, ext.Gy, ext.Bx, ext.By];
+            for (int i = 0; i < 8; i++) Fixed(chrm.AsSpan(i * 4), xy[i]);
+            WriteChunk(stream, "cHRM"u8, chrm);
+        }
+    }
+
+    /// <summary>
+    /// Writes metadata chunks (eXIf, iTXt) for an image.
+    /// </summary>
+    private static void WriteMetadataChunks(Stream stream, ImageFrame image)
+    {
 
         // EXIF → eXIf chunk (raw TIFF data)
         if (image.Metadata.ExifProfile is not null)

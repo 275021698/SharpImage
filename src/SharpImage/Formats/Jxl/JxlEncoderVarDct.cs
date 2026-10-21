@@ -65,6 +65,7 @@ internal static partial class JxlEncoder
             }
 
             JxlXybColor color = JxlXybColor.Plan(image, contentGray);
+            color.Orientation = HeaderOrientation(image);
             return new VarDctSource
             {
                 W = w,

@@ -11,6 +11,24 @@ public static class ExifParser
 {
     private static readonly byte[] ExifHeader = "Exif\0\0"u8.ToArray();
 
+    /// <summary>Sets an existing orientation tag to 1 (top-left), for pixels that are already displayed upright.</summary>
+    public static void ResetOrientation(ExifProfile? profile)
+    {
+        if (profile?.GetTag(ExifTag.Orientation) is { } tag)
+        {
+            byte[] one = profile.IsLittleEndian ? [1, 0] : [0, 1];
+            profile.SetTag(new ExifEntry { Tag = tag.Tag, DataType = ExifDataType.Short, Count = 1, Value = one });
+        }
+    }
+
+    /// <summary>The orientation tag (1..8) of a profile, or <see cref="Core.OrientationType.Undefined"/>.</summary>
+    public static Core.OrientationType OrientationOf(ExifProfile? profile)
+    {
+        if (profile?.GetTag(ExifTag.Orientation) is { } tag && tag.GetUInt16(profile.IsLittleEndian) is >= 1 and <= 8 and var o)
+            return (Core.OrientationType)o;
+        return Core.OrientationType.Undefined;
+    }
+
     /// <summary>
     /// Parses an EXIF profile from a JPEG APP1 segment payload (after the marker and length).
     /// Expected format: "Exif\0\0" + TIFF data.

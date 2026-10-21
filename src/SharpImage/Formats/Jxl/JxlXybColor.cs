@@ -22,6 +22,9 @@ internal sealed class JxlXybColor
     /// <summary>ToneMapping intensity_target: the luminance of linear 1.0, scaling XYB for HDR content.</summary>
     public float IntensityTarget = 255f;
 
+    /// <summary>The codestream orientation (1..8).</summary>
+    public uint Orientation = 1;
+
     private LjCms.Transform? toLinearSrgb;
     private bool inputLinear;
 
@@ -261,6 +264,7 @@ internal sealed class JxlXybColor
         var md = new LjImageMetadata { AllDefaultField = false, XybEncoded = true, Modular16BitBufferSufficient = true, ColorEncoding = Encoding };
         md.BitDepth.BitsPerSample = (uint)bits;
         md.ToneMapping.IntensityTarget = IntensityTarget;
+        md.Orientation = Orientation;
         if (hasAlpha)
         {
             md.ExtraChannelInfo.Add(new LjExtraChannelInfo());

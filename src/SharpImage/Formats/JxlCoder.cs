@@ -75,9 +75,9 @@ public static class JxlCoder
     /// </summary>
     public static byte[]? ReconstructJpeg(byte[] data) => Jxl.Lj.LjJpegRecon.Reconstruct(data);
 
-    // Pixel output: XYB images are rendered to their original colour space when SharpImage has one for it (sRGB,
-    // Display P3, Adobe RGB, linear, gray) and to sRGB otherwise - an XYB image with an ICC profile included, since
-    // without a CMS libjxl can only render enumerated spaces. Non-XYB images come out as stored, ICC attached.
+    // Pixel output: XYB images are rendered to their original colour space - an enumerated one by libjxl's
+    // pipeline, an ICC profile's through the CMS - and only to sRGB when neither is possible. Non-XYB images come out
+    // as stored. The frame carries the colour description (see BuildFrame).
     private static Jxl.Lj.LjDecodedImage DecodeLj(byte[] data, int maxFrames)
     {
         byte[] cs = FindCodestream(data);
@@ -95,13 +95,48 @@ public static class JxlCoder
     /// Encodes an image as a lossless JPEG XL codestream (Modular mode: clamped-gradient prediction +
     /// prefix entropy coding). Produces a standard bare codestream that libjxl / jxl-oxide decode.
     /// </summary>
-    public static byte[] Encode(ImageFrame image) => Jxl.JxlEncoder.EncodeLossless(image, JxlLosslessEffort.Balanced);
+    public static byte[] Encode(ImageFrame image) => WithMetadataBoxes(Jxl.JxlEncoder.EncodeLossless(image, JxlLosslessEffort.Balanced), image);
 
     /// <summary>
     /// Encodes an image as a lossless JPEG XL codestream at the given effort (every level is lossless; higher levels
     /// search more for a smaller file).
     /// </summary>
-    public static byte[] Encode(ImageFrame image, JxlLosslessEffort effort) => Jxl.JxlEncoder.EncodeLossless(image, effort);
+    public static byte[] Encode(ImageFrame image, JxlLosslessEffort effort) => WithMetadataBoxes(Jxl.JxlEncoder.EncodeLossless(image, effort), image);
+
+    /// <summary>
+    /// The codestream in a JPEG XL container with the image's Exif (raw TIFF data after a 4-byte offset) and XMP
+    /// ('xml ') as Brotli-compressed boxes before it, as cjxl writes them (compress_boxes); the bare codestream when
+    /// the image has neither. The EXIF orientation is in the codestream header (the box keeps the tag, as in cjxl).
+    /// </summary>
+    internal static byte[] WithMetadataBoxes(byte[] codestream, ImageFrame image)
+    {
+        byte[]? exif = image.Metadata.ExifProfile is { } e ? SharpImage.Metadata.ExifParser.SerializeForPngExif(e) : null;
+        byte[]? xmp = image.Metadata.Xmp is { Length: > 0 } x ? System.Text.Encoding.UTF8.GetBytes(x) : null;
+        if (exif == null && xmp == null)
+        {
+            return codestream;
+        }
+
+        var o = new MemoryStream(codestream.Length + 64 + (exif?.Length ?? 0) + (xmp?.Length ?? 0));
+        o.Write(ContainerSignature);
+        Jxl.Lj.LjJpegTranscoder.WriteBox(o, "ftyp", "jxl \0\0\0\0jxl "u8);
+        if (exif != null)
+        {
+            var exifBox = new byte[exif.Length + 4];   // tiff_header_offset 0
+            exif.CopyTo(exifBox, 4);
+            Jxl.Lj.LjJpegTranscoder.WriteBrob(o, "Exif", exifBox);
+        }
+
+        if (xmp != null)
+        {
+            Jxl.Lj.LjJpegTranscoder.WriteBrob(o, "xml ", xmp);
+        }
+
+        bool large = codestream.Length >= uint.MaxValue - 8;
+        Jxl.Lj.LjJpegTranscoder.WriteBoxHeader(o, "jxlc", codestream.Length, large);
+        o.Write(codestream);
+        return o.ToArray();
+    }
 
     /// <summary>
     /// Losslessly recompresses a JPEG into a JPEG XL file, exactly as libjxl's <c>cjxl</c> does by default for JPEG
@@ -124,7 +159,8 @@ public static class JxlCoder
     /// carries its own duration (from <see cref="ImageFrame.Delay"/>, centiseconds); the metadata holds the
     /// loop count. A one-frame sequence produces an ordinary still image.
     /// </summary>
-    public static byte[] EncodeAnimation(ImageSequence sequence) => Jxl.JxlEncoder.EncodeSequence(sequence);
+    public static byte[] EncodeAnimation(ImageSequence sequence) =>
+        sequence.Count == 0 ? Jxl.JxlEncoder.EncodeSequence(sequence) : WithMetadataBoxes(Jxl.JxlEncoder.EncodeSequence(sequence), sequence[0]);
 
     /// <summary>Decodes a (possibly animated) JPEG XL codestream into an image sequence, one frame per JXL
     /// frame with its per-frame <see cref="ImageFrame.Delay"/> (centiseconds) and the loop count.</summary>
@@ -155,7 +191,10 @@ public static class JxlCoder
     /// depth (8 default; 16 keeps full precision for a 16-bit source, avoiding 8-bit banding). Any positive
     /// size is supported: the frame is tiled into 2048x2048 LF groups and 256px coding groups.
     /// </summary>
-    public static byte[] EncodeLossy(ImageFrame image, int quality = 75, int effort = 7, int bits = 8)
+    public static byte[] EncodeLossy(ImageFrame image, int quality = 75, int effort = 7, int bits = 8) =>
+        WithMetadataBoxes(EncodeLossyCodestream(image, quality, effort, bits), image);
+
+    private static byte[] EncodeLossyCodestream(ImageFrame image, int quality, int effort, int bits)
     {
         if (!Jxl.JxlEncoder.CanEncodeVarDct(image))
         {
@@ -232,11 +271,47 @@ public static class JxlCoder
         bool hasAlpha = alphaEc >= 0;
         var frame = new ImageFrame();
         Jxl.Lj.LjColorEncoding enc = img.DataEncoding;
-        ColorspaceType space = Jxl.Lj.LjDecoder.MapColorspace(enc) ?? (gray ? ColorspaceType.Gray : ColorspaceType.SRGB);
-        frame.Initialize(fr.Width, fr.Height, space, hasAlpha);
-        if (enc.WantIcc && enc.Icc != null)
+        Jxl.Lj.LjColorEncoding orig = img.State.Meta.ColorEncoding;
+
+        // An XYB image with an ICC profile renders to linear sRGB; the CMS takes it on to the profile's space.
+        Jxl.Lj.LjCms.Transform? toIcc = null;
+        if (img.State.Meta.XybEncoded && orig.WantIcc && orig.Icc != null && !enc.WantIcc && Jxl.Lj.LjCe.TfIsLinear(enc) &&
+            Jxl.Lj.LjCms.FromIcc(orig.Icc) is { Cmyk: false } target && Jxl.Lj.LjCe.IsGray(target) == gray)
         {
-            frame.IccProfile = enc.Icc;
+            toIcc = Jxl.Lj.LjCms.Transform.Create(enc, target, img.State.Output.DesiredIntensityTarget);
+        }
+
+        // The colour description of the samples: an ICC profile, a SharpImage colour space, or (for encodings
+        // SharpImage has no colour space for: PQ, HLG, BT.709, custom primaries ...) libjxl's ICC profile for
+        // them plus CICP tags where H.273 has code points, so other formats keep the colours.
+        ColorspaceType space = gray ? ColorspaceType.Gray : ColorspaceType.SRGB;
+        byte[]? icc = null;
+        SharpImage.Metadata.CicpInfo? cicp = null;
+        if (toIcc != null)
+        {
+            icc = orig.Icc;
+        }
+        else if (enc.WantIcc && enc.Icc != null)
+        {
+            icc = enc.Icc;
+        }
+        else if (Jxl.Lj.LjDecoder.MapColorspace(enc) is { } mapped)
+        {
+            space = mapped;
+        }
+        else
+        {
+            icc = Jxl.Lj.LjCms.MaybeCreateProfile(Jxl.Lj.LjCms.ToExternal(enc));
+            cicp = ColorDescription.CicpOf(enc);
+        }
+
+        frame.Initialize(fr.Width, fr.Height, space, hasAlpha);
+        frame.IccProfile = icc;
+        frame.Metadata.Cicp = cicp;
+        frame.Metadata.IccFromEncoding = icc != null ? toIcc == null && !(enc.WantIcc && enc.Icc != null) : null;
+        if (!orig.WantIcc)
+        {
+            frame.Metadata.RenderingIntent = (int)orig.RenderingIntent;
         }
 
         frame.Orientation = OrientationType.TopLeft;
@@ -244,23 +319,39 @@ public static class JxlCoder
         int colorOut = gray ? 1 : 3;
         Jxl.Lj.LjImageF? alpha = hasAlpha ? fr.Planes[3 + alphaEc] : null;
         bool premultiplied = hasAlpha && img.State.Meta.ExtraChannelInfo[alphaEc].AlphaAssociated;
+        var src = new float[fr.Width * 4];
+        var dst = new float[fr.Width * 3];
         for (int y = 0; y < fr.Height; y++)
         {
             var row = frame.GetPixelRowForWrite(y);
             for (int x = 0; x < fr.Width; x++)
             {
-                int off = x * nc;
                 float a = alpha != null ? alpha.Data[alpha.Row(y) + x] : 1f;
                 float inv = premultiplied ? 1.0f / MathF.Max(1.0f / (1 << 24), a) : 1f;
                 for (int c = 0; c < colorOut; c++)
                 {
                     Jxl.Lj.LjImageF p = fr.Planes[c];
-                    row[off + c] = ToQuantum(p.Data[p.Row(y) + x] * inv);
+                    dst[(x * colorOut) + c] = p.Data[p.Row(y) + x] * inv;
+                }
+            }
+
+            if (toIcc != null)
+            {
+                Array.Copy(dst, src, fr.Width * colorOut);
+                toIcc.Run(src, dst, fr.Width);
+            }
+
+            for (int x = 0; x < fr.Width; x++)
+            {
+                int off = x * nc;
+                for (int c = 0; c < colorOut; c++)
+                {
+                    row[off + c] = ToQuantum(dst[(x * colorOut) + c]);
                 }
 
                 if (hasAlpha)
                 {
-                    row[off + nc - 1] = ToQuantum(a);
+                    row[off + nc - 1] = ToQuantum(alpha!.Data[alpha.Row(y) + x]);
                 }
             }
         }
@@ -290,6 +381,8 @@ public static class JxlCoder
                 if (4 + tiffOff < exif[0].Length)
                 {
                     frame.Metadata.ExifProfile = SharpImage.Metadata.ExifParser.ParseFromTiff(exif[0].AsSpan(4 + (int)tiffOff));
+                    // the decoder applies the codestream orientation: the pixels are upright (djxl resets it too)
+                    SharpImage.Metadata.ExifParser.ResetOrientation(frame.Metadata.ExifProfile);
                 }
             }
 
