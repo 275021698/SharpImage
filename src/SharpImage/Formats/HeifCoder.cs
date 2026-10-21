@@ -812,8 +812,24 @@ public static partial class HeifCoder
             return frame;
         }
         var tileFrames = new ImageFrame[tiles.Count];
-        for (int i = 0; i < tiles.Count; i++)
-            tileFrames[i] = DecodeCodedItem(c, tiles[i], codec, nclx, premAlpha);
+        if (tiles.Count > 1)
+        {
+            // independent tiles decode in parallel (a camera grid has dozens)
+            try
+            {
+                Parallel.For(0, tiles.Count, new ParallelOptions { MaxDegreeOfParallelism = Math.Min(Environment.ProcessorCount, 8) },
+                    i => tileFrames[i] = DecodeCodedItem(c, tiles[i], codec, nclx, premAlpha));
+            }
+            catch (AggregateException e) when (e.InnerExceptions.Count > 0)
+            {
+                foreach (var f in tileFrames) f?.Dispose();
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(e.InnerExceptions[0]).Throw();
+            }
+        }
+        else
+        {
+            tileFrames[0] = DecodeCodedItem(c, tiles[0], codec, nclx, premAlpha);
+        }
         int tw = (int)tileFrames[0].Columns, th = (int)tileFrames[0].Rows;
         if (outW <= 0 || outH <= 0) (outW, outH) = (tw * cols, th * rows);
         if (tiles.Count > 1 && (tw * cols < outW || th * rows < outH))
@@ -824,6 +840,7 @@ public static partial class HeifCoder
         frame.Initialize(outW, outH, ColorspaceType.SRGB, false);
         for (int i = 0; i < tiles.Count; i++) Blit(tileFrames[i], frame, (i % cols) * tw, (i / cols) * th, alphaOnly: false);
         frame.Metadata.Cicp = tileFrames[0].Metadata.Cicp;
+        foreach (var t in tileFrames) t.Dispose();
         return frame;
     }
 

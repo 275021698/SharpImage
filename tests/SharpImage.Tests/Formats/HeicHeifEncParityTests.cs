@@ -56,7 +56,7 @@ public sealed class HeicHeifEncParityTests
 
     // Decoding as heif-dec does (libheif 1.23.6 + libde265; SHA-256 of its PNG's samples at 16 bits): libheif's
     // colour conversions (8-bit fixed point, deeper float, 4:0:0 copied), its 16-bit scaling, alpha, irot, and a
-    // picture the SPS holds back for reordering (libheif_example.heic).
+    // picture the SPS holds back for reordering (libheif_example.heic), a 512x512 grid (tiles decoded in parallel).
     [Test]
     [Arguments("rgba_q50.heic", "0f0ff5966b6fe80ee68f8c8239d06ce0b7e88da1491dff301c912aca991cd065")]
     [Arguments("gray_q50.heic", "c0cec6846e9138b8c74f543d409ad9e6795a0ffd0b6a2f8af436a832700bc379")]
@@ -67,6 +67,7 @@ public sealed class HeicHeifEncParityTests
     [Arguments("grayd16_odd_q50.heic", "9db51eb4919b20cc89c6dcba6acebd3785af00ab0c78cad64c1f7b7b3a1061a0")]
     [Arguments("xmp_q50.heic", "6c62a72a3bcf1e6763f22b448fac0792626e8855d1e1230c81bd3c9af32835ff")]
     [Arguments("libheif_example.heic", "7f8009bb1558f4a35e6134318f7a17aa9a1c214706790ed0b973065925923d7a")]
+    [Arguments("grid512_q50.heic", "55e7a097ff20ac9c5361c91d627ee5d7deb579c6835983c1583cffba00b295da")]
     public async Task Decode_MatchesHeifDec(string file, string sha256)
     {
         using var image = FormatRegistry.Read(Asset(file));
