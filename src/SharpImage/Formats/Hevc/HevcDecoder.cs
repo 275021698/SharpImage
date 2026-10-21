@@ -117,7 +117,7 @@ internal sealed partial class HevcDecoder
 
     // Persistent rice adaptation state (FFmpeg: lc->stat_coeff[4])
     // Indices: 0 = luma non-skip, 1 = luma skip/bypass, 2 = chroma non-skip, 3 = chroma skip/bypass
-    private readonly int[] statCoeff = new int[4];
+    private int[] statCoeff = new int[4];
 
     // NAL unit length size for hvcC format (0 = Annex B, 1-4 = length prefix size)
     private int nalLengthSize;
@@ -2070,6 +2070,12 @@ internal sealed partial class HevcDecoder
             }
         }
         int tileEntryIndex = 0; // tracks which tile entry point we're on
+
+        if (wppRowByteOffsets != null && CanDecodeWppRowsInParallel(sliceHeader, sps, pps, startCtb, ctbWidth, wppRowByteOffsets.Length))
+        {
+            DecodeWppRowsInParallel(rbsp, dataOffset, wppRowByteOffsets, sliceHeader, sps, pps, startCtb, ctbWidth, sliceQp, initType);
+            return;
+        }
 
         for (int ctbAddrTs = startCtbTs; ctbAddrTs < totalCtbs; ctbAddrTs++)
         {

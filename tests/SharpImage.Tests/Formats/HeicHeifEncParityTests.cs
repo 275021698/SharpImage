@@ -102,6 +102,47 @@ public sealed class HeicHeifEncParityTests
         await Assert.That(hash).IsEqualTo(sha256);
     }
 
+    // WPP streams decode their CTU rows in parallel: the same samples as the rows decoded one after another
+    [Test]
+    [Arguments("photo640_q75.heic")]
+    [Arguments("rgba16_q50.heic")]
+    [Arguments("rgb_odd_q50.heic")]
+    [Arguments("o5_q50.heic")]
+    [Arguments("libheif_example.heic")]
+    public async Task Decode_WppRowsInParallel_MatchSequential(string file)
+    {
+        static byte[] Samples(string path)
+        {
+            using var image = FormatRegistry.Read(path);
+            var samples = new List<byte>();
+            for (int y = 0; y < (int)image.Rows; y++)
+            {
+                foreach (ushort v in image.GetPixelRow(y))
+                {
+                    samples.Add((byte)v);
+                    samples.Add((byte)(v >> 8));
+                }
+            }
+
+            return samples.ToArray();
+        }
+
+        byte[] parallel = Samples(Asset(file));
+        int prev = SharpImage.Formats.Hevc.HevcDecoder.t_maxWppThreads;
+        SharpImage.Formats.Hevc.HevcDecoder.t_maxWppThreads = 1;
+        byte[] sequential;
+        try
+        {
+            sequential = Samples(Asset(file));
+        }
+        finally
+        {
+            SharpImage.Formats.Hevc.HevcDecoder.t_maxWppThreads = prev;
+        }
+
+        await Assert.That(parallel.AsSpan().SequenceEqual(sequential)).IsTrue();
+    }
+
     // heif-enc reads a 16-bit gray + alpha PNG as RGBA (4 samples per pixel from 2-sample rows: garbage); SharpImage codes
     // it as it codes 8-bit gray + alpha and 16-bit gray: a 10-bit monochrome item with a 10-bit alpha item.
     [Test]
