@@ -3216,7 +3216,7 @@ internal sealed partial class HevcDecoder
         int cropLeftLuma = 0, cropTopLuma = 0, cropLeftChroma = 0, cropTopChroma = 0;
         if (sps != null && sps.ConformanceWindowFlag)
         {
-            int subWidthC = sps.ChromaFormatIdc == HevcChromaFormat.Chroma444 ? 1 : 2;
+            int subWidthC = sps.ChromaFormatIdc is HevcChromaFormat.Chroma420 or HevcChromaFormat.Chroma422 ? 2 : 1;
             int subHeightC = sps.ChromaFormatIdc == HevcChromaFormat.Chroma420 ? 2 : 1;
             cropLeftLuma = sps.ConfWinLeftOffset * subWidthC;
             cropTopLuma = sps.ConfWinTopOffset * subHeightC;

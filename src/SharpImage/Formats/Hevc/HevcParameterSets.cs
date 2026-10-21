@@ -625,7 +625,7 @@ public sealed class HevcSequenceParameterSet
             if (!ConformanceWindowFlag)
                 return PictureWidthInLumaSamples;
             
-            int subWidthC = ChromaFormatIdc == HevcChromaFormat.Chroma444 ? 1 : 2;
+            int subWidthC = ChromaFormatIdc is HevcChromaFormat.Chroma420 or HevcChromaFormat.Chroma422 ? 2 : 1;   // 1 for 4:0:0 / 4:4:4
             return PictureWidthInLumaSamples - subWidthC * (ConfWinLeftOffset + ConfWinRightOffset);
         }
     }
