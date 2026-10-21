@@ -152,10 +152,97 @@ public static partial class HeifCoder
         {
             var clap = new uint[8];
             for (int k = 0; k < 8; k++) clap[k] = System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(data.AsSpan(cp.Off + (4 * k)));
-            crop = CropRectFromCleanAperture(clap, w, h);
+            crop = LibheifClapCrop(clap, w, h);
         }
 
         return HeifTransformNeeds444(chroma, w, h, crop, irot, imir);
+    }
+
+    // libheif's clean-aperture crop (Box_clap::get_crop, clamped as ImageItem::decode_image clamps it): left rounded
+    // toward zero, top rounded, right / bottom rounded from them, in libheif's Fraction arithmetic. Null when the
+    // box is invalid (libheif fails the decode; here the crop is skipped).
+    private static (int X, int Y, int W, int H)? LibheifClapCrop(uint[] c, int imageW, int imageH)
+    {
+        if (imageW <= 0 || imageH <= 0) return null;
+        if (LhFraction.FromChecked(c[0], c[1]) is not { } cw || LhFraction.FromChecked(c[2], c[3]) is not { } ch
+            || LhFraction.FromChecked((int)c[4], c[5]) is not { } offX || LhFraction.FromChecked((int)c[6], c[7]) is not { } offY)
+        {
+            return null;
+        }
+
+        var pcX = offX.Add(LhFraction.From32(imageW - 1, 2));
+        var pcY = offY.Add(LhFraction.From32(imageH - 1, 2));
+        var left = pcX.Sub(cw.SubInt(1).DivInt(2));
+        var top = pcY.Sub(ch.SubInt(1).DivInt(2));
+        int l = left.RoundDown(), t = top.Round();
+        int r = cw.SubInt(1).AddInt(l).Round(), b = ch.SubInt(1).AddInt(t).Round();
+        if (l < 0) l = 0;
+        if (t < 0) t = 0;
+        if (r >= imageW) r = imageW - 1;
+        if (b >= imageH) b = imageH - 1;
+        if (l > r || t > b) return null;
+        return (l, t, r - l + 1, b - t + 1);
+    }
+
+    // libheif's Fraction: int32 numerator / denominator, reduced (halved) to stay in range
+    private readonly struct LhFraction
+    {
+        private const int MaxFractionValue = 0x10000;
+        private readonly int num, den;
+
+        private LhFraction(int n, int d) => (num, den) = (n, d);
+
+        // Fraction(int32_t, int32_t)
+        public static LhFraction From32(int n, int d)
+        {
+            while (d > MaxFractionValue || d < -MaxFractionValue)
+            {
+                n /= 2;
+                d /= 2;
+            }
+
+            while (d > 1 && (n > MaxFractionValue || n < -MaxFractionValue))
+            {
+                n /= 2;
+                d /= 2;
+            }
+
+            return new LhFraction(n, d);
+        }
+
+        // Fraction(int64_t, int64_t)
+        public static LhFraction From64(long n, long d)
+        {
+            while (n < int.MinValue || n > int.MaxValue || d < int.MinValue || d > int.MaxValue)
+            {
+                n = (n + (n >= 0 ? 1 : -1)) / 2;
+                d = (d + (d >= 0 ? 1 : -1)) / 2;
+            }
+
+            return new LhFraction((int)n, (int)d);
+        }
+
+        // Fraction::from_signed / from_unsigned: in int32 range, nonzero denominator
+        public static LhFraction? FromChecked(long n, long d)
+        {
+            if (n < int.MinValue || n > int.MaxValue || d < int.MinValue || d > int.MaxValue) return null;
+            var f = From32((int)n, (int)d);
+            return f.den == 0 ? null : f;
+        }
+
+        public LhFraction Add(LhFraction b) => den == b.den ? From64((long)num + b.num, den) : From64(((long)num * b.den) + ((long)b.num * den), (long)den * b.den);
+
+        public LhFraction Sub(LhFraction b) => den == b.den ? From64((long)num - b.num, den) : From64(((long)num * b.den) - ((long)b.num * den), (long)den * b.den);
+
+        public LhFraction AddInt(int v) => From64(num + (v * (long)den), den);
+
+        public LhFraction SubInt(int v) => From64(num - (v * (long)den), den);
+
+        public LhFraction DivInt(int v) => From64(num, (long)den * v);
+
+        public int RoundDown() => num / den;
+
+        public int Round() => (int)((num + ((long)den / 2)) / den);
     }
 
     // Whether libheif converts the decoded image to YCbCr 4:4:4 (bilinear chroma) for one of the transformations

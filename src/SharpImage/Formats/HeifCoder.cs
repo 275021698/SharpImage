@@ -658,6 +658,7 @@ public static partial class HeifCoder
         // ---- a Sample Transform ('sato', e.g. 16-bit depth extension) preferred over the primary: decoded as avifdec does
         ImageFrame frame;
         YCbCrPlanes? primaryPlanes = null;
+        bool hevcItem = false;   // a HEVC (HEIC) primary: libheif's clean-aperture rounding
         if (TryDecodeSampleTransform(c, pid) is { } satoFrame)
         {
             frame = satoFrame;
@@ -666,6 +667,7 @@ public static partial class HeifCoder
 
         // ---- colour image: a coded item, or a 'grid' of coded tiles (ISO/IEC 23008-12 6.6.2.3) ----------------------
         var (tiles, rows, cols, outW, outH, codec) = ResolveImageTiles(c, pid);
+        hevcItem = codec != "av01";
         var nclx = Nclx(c, pid);
 
         // Premultiplied alpha ('prem' colour -> alpha): libavif un-premultiplies during/after YUV->RGB. For a single
@@ -766,10 +768,10 @@ public static partial class HeifCoder
         int? irot = c.Property(pid, "irot") is { Len: >= 1 } ir ? data[ir.Off] & 3 : null;
         int? imir = c.Property(pid, "imir") is { Len: >= 1 } im ? data[im.Off] & 1 : null;
         int preW = (int)frame.Columns, preH = (int)frame.Rows;
-        var shown = ApplyHeifTransforms(frame, clap, irot, imir);
+        var shown = ApplyHeifTransforms(frame, clap, irot, imir, hevcItem);
         if (primaryPlanes != null && primaryPlanes.W == preW && primaryPlanes.H == preH)
         {
-            var crop = clap != null ? CropRectFromCleanAperture(clap, preW, preH) : null;
+            var crop = clap != null ? LibheifClapCrop(clap, preW, preH) : null;
             var tp = TransformPlanesLikeLibheif(primaryPlanes, crop, irot, imir);
             if (tp.W == shown.Columns && tp.H == shown.Rows)
             {
@@ -1067,10 +1069,10 @@ public static partial class HeifCoder
     // HEIF transformative properties are essential: the displayed image is clap-cropped, then rotated (irot, anti-
     // clockwise quarter turns), then mirrored (imir: 0 = top/bottom, 1 = left/right) — MIAF 7.3.6.7 order. The result
     // is display-oriented, so Orientation (and any EXIF orientation tag, which AVIF readers ignore) become top-left.
-    private static ImageFrame ApplyHeifTransforms(ImageFrame frame, uint[]? clap, int? irot, int? imir)
+    private static ImageFrame ApplyHeifTransforms(ImageFrame frame, uint[]? clap, int? irot, int? imir, bool libheifClap = false)
     {
         var src = frame;
-        if (clap != null && CropRectFromCleanAperture(clap, (int)frame.Columns, (int)frame.Rows) is { } r
+        if (clap != null && (libheifClap ? LibheifClapCrop(clap, (int)frame.Columns, (int)frame.Rows) : CropRectFromCleanAperture(clap, (int)frame.Columns, (int)frame.Rows)) is { } r
             && (r.X != 0 || r.Y != 0 || r.W != frame.Columns || r.H != frame.Rows))
             frame = SharpImage.Transform.Geometry.Crop(frame, r.X, r.Y, r.W, r.H);
         if (irot is 1 or 2 or 3)

@@ -75,6 +75,11 @@ public sealed class HeicHeifEncParityTests
     [Arguments("grid_o5_420.heic", "b6a585803e654ee966f91606a027e7633f3a018b62d5e469281d5213d4408fcf")]
     [Arguments("grid_o8_422.heic", "919714884451c10b4674ccef479ba12c40da335a54cecef7f8263b2c7b632afb")]
     [Arguments("deepa_o6.heic", "59098e85e0d30070f7436b2c97e245deff3adc189f8d591acf68843433234aaa")]
+    // libheif's clap rounding (left toward zero, top rounded, clamped to the image): an odd left edge (4:4:4 first),
+    // a crop past the image, a fractional offset
+    [Arguments("clap_odd_left.heic", "0b449610a75182cf7d901b5ed8b1cea296569e97b67e94374f99b8b0875cca63")]
+    [Arguments("clap_clamp.heic", "aa98a65742edb72a23485c72918aec64b1c95cdfbbbfc6136debb71a24e369ff")]
+    [Arguments("clap_third.heic", "f5cbe004c3d8643e8de643f83e0647c182b9be0c13984f49e8326fea08b2fffb")]
     public async Task Decode_MatchesHeifDec(string file, string sha256)
     {
         using var image = FormatRegistry.Read(Asset(file));
