@@ -96,7 +96,7 @@ public static partial class JpegCoder
     }
 
     // Marker segments from SOI up to the first SOS: (marker, payload offset, payload length).
-    private static List<(int Marker, int Offset, int Length)> ScanSegments(byte[] d, int start)
+    internal static List<(int Marker, int Offset, int Length)> ScanSegments(byte[] d, int start)
     {
         var list = new List<(int, int, int)>();
         int p = start + 2;

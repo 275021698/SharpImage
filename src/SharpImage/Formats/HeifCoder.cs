@@ -88,6 +88,16 @@ public enum AvifTune
     Ssim,
 }
 
+/// <summary>HEIC encoding options (libheif heif-enc with x265).</summary>
+public sealed class HeicEncodeOptions
+{
+    /// <summary>heif-enc -q: quality 0..100 (x265 CRF = (100 - quality) / 2). Default 50, heif-enc's default.</summary>
+    public int Quality { get; set; } = 50;
+
+    /// <summary>Constant QP 0..51 (x265 --qp) instead of the quality's CRF rate control, or null.</summary>
+    public int? Qp { get; set; }
+}
+
 public sealed class AvifEncodeOptions
 {
     /// <summary>libavif's -a tune. Null (default): libavif's own choice — tune=iq for still and layered colour images
@@ -1075,13 +1085,13 @@ public static partial class HeifCoder
     }
 
     public static byte[] Encode(ImageFrame image, HeifContainerType containerType = HeifContainerType.Avif)
-        => Encode(image, containerType, 20);
+        => containerType == HeifContainerType.Avif ? Encode(image, containerType, 20) : EncodeHeic(image);
 
     /// <summary>
     /// Encodes an image to HEIC (HEVC) or AVIF (AV1) still image at the given quantization parameter (0 = highest
     /// quality/largest, ~51 = lowest). AVIF uses SharpImage's from-scratch AV1 intra encoder with automatic bit
     /// depth (see <see cref="AvifEncodeOptions.BitDepth"/>); use <see cref="EncodeAvif(ImageFrame, AvifEncodeOptions?)"/>
-    /// for full control.
+    /// for full control. HEIC codes at constant QP (x265 --qp); <see cref="EncodeHeic"/> takes heif-enc's quality.
     /// </summary>
     public static byte[] Encode(ImageFrame image, HeifContainerType containerType, int qp)
     {
@@ -1090,12 +1100,23 @@ public static partial class HeifCoder
             return EncodeAvif(image, new AvifEncodeOptions { Qp = qp });
         }
 
+        return EncodeHeic(image, new HeicEncodeOptions { Qp = Math.Clamp(qp, 0, 51) });
+    }
+
+    /// <summary>
+    /// Encodes an image as HEIC exactly as libheif's heif-enc (with x265) does: gray as a monochrome item, colour as
+    /// YCbCr 4:2:0, alpha as an auxiliary item, ICC / EXIF / XMP and the orientation (irot/imir) carried over.
+    /// </summary>
+    public static byte[] EncodeHeic(ImageFrame image, HeicEncodeOptions? options = null)
+    {
+        options ??= new HeicEncodeOptions();
         int w = (int)image.Columns;
         int h = (int)image.Rows;
         int ch = image.NumberOfChannels;
         int colors = ch - (image.HasAlpha ? 1 : 0);
-        int outCh = image.HasAlpha ? 4 : 3;
-        var rgb = new byte[w * h * outCh];
+        bool gray = IsGreyImage(image);   // gray content is coded as a monochrome item, as heif-enc codes a gray source
+        int outCh = (gray ? 1 : 3) + (image.HasAlpha ? 1 : 0);
+        var px = new byte[w * h * outCh];
         for (int y = 0; y < h; y++)
         {
             ReadOnlySpan<ushort> row = image.GetPixelRow(y);
@@ -1103,22 +1124,27 @@ public static partial class HeifCoder
             {
                 int o = x * ch;
                 int d = ((y * w) + x) * outCh;
-                rgb[d] = Quantum.ScaleToByte(row[o]);
-                rgb[d + 1] = Quantum.ScaleToByte(colors > 1 ? row[o + 1] : row[o]);
-                rgb[d + 2] = Quantum.ScaleToByte(colors > 2 ? row[o + 2] : row[o]);
-                if (outCh == 4) rgb[d + 3] = Quantum.ScaleToByte(row[o + ch - 1]);
+                px[d] = Quantum.ScaleToByte(row[o]);
+                if (!gray)
+                {
+                    px[d + 1] = Quantum.ScaleToByte(colors > 1 ? row[o + 1] : row[o]);
+                    px[d + 2] = Quantum.ScaleToByte(colors > 2 ? row[o + 2] : row[o]);
+                }
+
+                if (image.HasAlpha) px[d + outCh - 1] = Quantum.ScaleToByte(row[o + ch - 1]);
             }
         }
 
-        // The samples' colour: colr nclx from CICP tags (the image's, or its colour space's) and colr prof from the
-        // image's ICC profile (or libjxl's for a colour space without code points).
+        // The samples' colour: colr prof from the image's ICC profile, else colr nclx from its CICP code points
+        // (heif-enc's default nclx: sRGB primaries and transfer, BT.601 matrix, full range)
         (byte[]? icc, SharpImage.Metadata.CicpInfo? cicp) = ColorDescription.Resolve(image);
-        icc = ColorDescription.ResolveRgbIcc(image, out _);   // HEIC stores RGB: a gray profile as its RGB equivalent
-        int cp = cicp?.ColorPrimaries ?? (icc != null ? 2 : 1), tc = cicp?.TransferCharacteristics ?? (icc != null ? 2 : 13);
+        if (!gray) icc = ColorDescription.ResolveRgbIcc(image, out _);
+        int cp = cicp?.ColorPrimaries ?? 1, tc = cicp?.TransferCharacteristics ?? 13;
         byte[]? exif = image.Metadata.ExifProfile is { } e ? SharpImage.Metadata.ExifParser.SerializeForPngExif(e) : null;
         byte[]? xmp = image.Metadata.Xmp is { } xmpText ? System.Text.Encoding.UTF8.GetBytes(xmpText) : null;
-        (int? irot, int? imir) = OrientationToIrotImir(image.Orientation);
-        return Hevc.HeicEncoder.Encode(rgb, w, h, outCh, Math.Clamp(qp, 0, 51), signDataHiding: true, cp, tc, icc, exif, xmp, irot, imir);
+        int orientation = (int)image.Orientation is >= 1 and <= 8 ? (int)image.Orientation : 1;
+        return Hevc.HeicEncoder.Encode(px, w, h, outCh, Math.Clamp(options.Quality, 0, 100), options.Qp, cp, tc, icc, exif, xmp,
+            orientation);
     }
 
     // AVIF encode via the from-scratch AV1 intra encoder. Current scope: grayscale, up to one 64x64 superblock.

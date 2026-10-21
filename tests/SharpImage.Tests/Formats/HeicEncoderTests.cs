@@ -46,12 +46,13 @@ public sealed class HeicEncoderTests
         using var src = Make(w, h, gray, alpha);
         byte[] heic = FormatRegistry.Encode(src, ImageFileFormat.Heic);
 
-        // the coded size (ispe) is even; an odd source size is cropped by clap
+        // the coded size (ispe) is even and at least 64 (as libheif's x265 plugin pads); a source of another size is
+        // cropped by clap
         int ispe = FindBox(heic, "ispe");
         int iw = (heic[ispe + 8] << 24) | (heic[ispe + 9] << 16) | (heic[ispe + 10] << 8) | heic[ispe + 11];
         int ih = (heic[ispe + 12] << 24) | (heic[ispe + 13] << 16) | (heic[ispe + 14] << 8) | heic[ispe + 15];
-        await Assert.That(iw % 2 == 0 && ih % 2 == 0).IsTrue();
-        await Assert.That(FindBox(heic, "clap") >= 0).IsEqualTo(w % 2 == 1 || h % 2 == 1);
+        await Assert.That(iw % 2 == 0 && ih % 2 == 0 && iw >= 64 && ih >= 64).IsTrue();
+        await Assert.That(FindBox(heic, "clap") >= 0).IsEqualTo(iw != w || ih != h);
         await Assert.That(FindBox(heic, "auxC") >= 0).IsEqualTo(alpha);
 
         using var back = FormatRegistry.Read(heic);
