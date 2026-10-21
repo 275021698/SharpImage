@@ -511,6 +511,9 @@ internal sealed unsafe class X265Quant
     private static long RdCost(long lambda2, int scaleBits, int d, long bits) => (((long)d * d) << scaleBits) + SigCost(lambda2, bits);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static long DeltaRdCost(long lambda2, int scaleBits, long d0, int dd, long deltabits) => ((((long)dd * dd) - d0) << scaleBits) + ((lambda2 * deltabits) >> 8);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static long PsyValue(long psyScale, int psyShift, long rec) => (psyScale * rec) >> psyShift;
 
     private uint RdoQuant(X265CuData cu, short* dstCoeff, int ttype, uint absPartIdx, bool usePsy, uint log2TrSize)
@@ -994,7 +997,7 @@ internal sealed unsafe class X265Quant
             }
 
             // rate-distortion based sign hiding
-            if (cu.m_slice.m_pps.bSignHideEnabled && numSig >= 2)
+            if (signHide && numSig >= 2)
             {
                 int realLastScanPos = (bestLastIdx - 1) >> LOG2_SCAN_SET_SIZE;
                 int lastCG = 1;
@@ -1034,15 +1037,13 @@ internal sealed unsafe class X265Quant
                                 long origDist = (long)d * d;
                                 uint isOne = absLevel == 1 ? 1u : 0u;
 
-                                long DELTARDCOST(long d0, int dd, long deltabits) => ((((long)dd * dd) - d0) << scaleBits) + ((lambda2 * deltabits) >> 8);
-
                                 if (dstCoeff[blkPos] != 0)
                                 {
                                     d = Math.Abs(signCoef) - (int)((unQuantLevel + preDQuantLevelDiff) >> unquantShift);
-                                    long costUp = DELTARDCOST(origDist, d, rateIncUp[blkPos]);
+                                    long costUp = DeltaRdCost(lambda2, scaleBits, origDist, d, rateIncUp[blkPos]);
                                     d = Math.Abs(signCoef) - (int)((unQuantLevel - preDQuantLevelDiff) >> unquantShift);
                                     int downBits = rateIncDown[blkPos] - (isOne != 0 ? IEP_RATE + sigRateDelta[blkPos] : 0);
-                                    long costDown = DELTARDCOST(origDist, d, downBits);
+                                    long costDown = DeltaRdCost(lambda2, scaleBits, origDist, d, downBits);
                                     costDown -= lastCoeffAdjust;
                                     curCost = ((n == firstNZPosInCG) && isOne != 0) ? long.MaxValue : costDown;
                                     curChange = (2 * (costUp < costDown ? 1 : 0)) - 1;
@@ -1055,7 +1056,7 @@ internal sealed unsafe class X265Quant
                                 else
                                 {
                                     d = Math.Abs(signCoef) - (int)((preDQuantLevelDiff + (uint)unquantRound) >> unquantShift);
-                                    curCost = DELTARDCOST(origDist, d, rateIncUp[blkPos] + IEP_RATE + sigRateDelta[blkPos]);
+                                    curCost = DeltaRdCost(lambda2, scaleBits, origDist, d, rateIncUp[blkPos] + IEP_RATE + sigRateDelta[blkPos]);
                                     curChange = 1;
                                 }
 

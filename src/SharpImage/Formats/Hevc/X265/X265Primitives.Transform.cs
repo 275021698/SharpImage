@@ -54,6 +54,12 @@ internal static unsafe partial class X265Primitives
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     private static void MatRows(short* input, long inStride, short* output, long outStride, int n, short* coef, int add, int shift)
     {
+        if (Avx2.IsSupported && n >= 8)
+        {
+            MatRowsAvx2(input, inStride, output, outStride, n, coef, add, shift);
+            return;
+        }
+
         int groups = n >> 2, pairs = n >> 1;
         Vector128<int>* acc = stackalloc Vector128<int>[8];
         var vadd = Vector128.Create(add);
@@ -88,12 +94,85 @@ internal static unsafe partial class X265Primitives
         }
     }
 
+    // MatRows with 8 outputs per pmaddwd (two adjacent groups of the table; n >= 8)
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    private static void MatRowsAvx2(short* input, long inStride, short* output, long outStride, int n, short* coef, int add, int shift)
+    {
+        int octets = n >> 3, pairs = n >> 1;
+        Vector256<int>* acc = stackalloc Vector256<int>[4];
+        var vadd = Vector256.Create(add);
+        for (int r = 0; r < n; r++)
+        {
+            short* x = input + (r * inStride);
+            for (int g = 0; g < octets; g++) acc[g] = vadd;
+            short* c = coef;
+            for (int m = 0; m < pairs; m++)
+            {
+                var b = Vector256.Create(*(int*)(x + (2 * m))).AsInt16();
+                for (int g = 0; g < octets; g++, c += 16)
+                {
+                    acc[g] = Avx2.Add(acc[g], Avx2.MultiplyAddAdjacent(b, Avx.LoadAlignedVector256(c)));
+                }
+            }
+
+            short* o = output + (r * outStride);
+            for (int g = 0; g < octets; g++)
+            {
+                var v = Avx2.ShiftRightArithmetic(acc[g], (byte)shift);
+                Sse2.Store(o + (8 * g), Sse2.PackSignedSaturate(v.GetLower(), v.GetUpper()));
+            }
+        }
+    }
+
+    // n x n int16 transpose: 8x8 blocks with SSE2 unpacks (n = 4 scalar)
     private static void Transpose16(short* src, short* dst, int n)
     {
-        for (int i = 0; i < n; i++)
+        if (n == 4)
         {
-            for (int j = 0; j < n; j++) dst[(j * n) + i] = src[(i * n) + j];
+            for (int i = 0; i < 4; i++)
+            {
+                for (int j = 0; j < 4; j++) dst[(j * 4) + i] = src[(i * 4) + j];
+            }
+
+            return;
         }
+
+        for (int bi = 0; bi < n; bi += 8)
+        {
+            for (int bj = 0; bj < n; bj += 8)
+            {
+                Transpose8x8(src + (bi * n) + bj, dst + (bj * n) + bi, n);
+            }
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void Transpose8x8(short* src, short* dst, int stride)
+    {
+        var r0 = Sse2.LoadVector128(src);
+        var r1 = Sse2.LoadVector128(src + stride);
+        var r2 = Sse2.LoadVector128(src + (2 * stride));
+        var r3 = Sse2.LoadVector128(src + (3 * stride));
+        var r4 = Sse2.LoadVector128(src + (4 * stride));
+        var r5 = Sse2.LoadVector128(src + (5 * stride));
+        var r6 = Sse2.LoadVector128(src + (6 * stride));
+        var r7 = Sse2.LoadVector128(src + (7 * stride));
+        var a0 = Sse2.UnpackLow(r0, r1); var a1 = Sse2.UnpackHigh(r0, r1);
+        var a2 = Sse2.UnpackLow(r2, r3); var a3 = Sse2.UnpackHigh(r2, r3);
+        var a4 = Sse2.UnpackLow(r4, r5); var a5 = Sse2.UnpackHigh(r4, r5);
+        var a6 = Sse2.UnpackLow(r6, r7); var a7 = Sse2.UnpackHigh(r6, r7);
+        var b0 = Sse2.UnpackLow(a0.AsInt32(), a2.AsInt32()).AsInt64(); var b1 = Sse2.UnpackHigh(a0.AsInt32(), a2.AsInt32()).AsInt64();
+        var b2 = Sse2.UnpackLow(a1.AsInt32(), a3.AsInt32()).AsInt64(); var b3 = Sse2.UnpackHigh(a1.AsInt32(), a3.AsInt32()).AsInt64();
+        var b4 = Sse2.UnpackLow(a4.AsInt32(), a6.AsInt32()).AsInt64(); var b5 = Sse2.UnpackHigh(a4.AsInt32(), a6.AsInt32()).AsInt64();
+        var b6 = Sse2.UnpackLow(a5.AsInt32(), a7.AsInt32()).AsInt64(); var b7 = Sse2.UnpackHigh(a5.AsInt32(), a7.AsInt32()).AsInt64();
+        Sse2.Store(dst, Sse2.UnpackLow(b0, b4).AsInt16());
+        Sse2.Store(dst + stride, Sse2.UnpackHigh(b0, b4).AsInt16());
+        Sse2.Store(dst + (2 * stride), Sse2.UnpackLow(b1, b5).AsInt16());
+        Sse2.Store(dst + (3 * stride), Sse2.UnpackHigh(b1, b5).AsInt16());
+        Sse2.Store(dst + (4 * stride), Sse2.UnpackLow(b2, b6).AsInt16());
+        Sse2.Store(dst + (5 * stride), Sse2.UnpackHigh(b2, b6).AsInt16());
+        Sse2.Store(dst + (6 * stride), Sse2.UnpackLow(b3, b7).AsInt16());
+        Sse2.Store(dst + (7 * stride), Sse2.UnpackHigh(b3, b7).AsInt16());
     }
 
     // dct: pass 1 rows of the residual, pass 2 rows of the transposed result, the output transposed back
