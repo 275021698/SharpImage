@@ -220,6 +220,33 @@ namespace SharpImage.Formats.Hevc
             bool isIntra = false,
             int bitDepth = 8)
         {
+            // the x265 port's kernels compute the same integer transforms (8-bit and 10-bit builds: 2nd pass shift
+            // 12 / 10), skipping the all-zero rows and columns
+            if ((bitDepth == 8 || bitDepth == 10) && Ssse3.IsSupported && size is 4 or 8 or 16 or 32
+                && coefficients.Length >= size * size && output.Length >= size * size)
+            {
+                unsafe
+                {
+                    fixed (short* c = coefficients)
+                    fixed (short* o = output)
+                    {
+                        int sizeIdx = System.Numerics.BitOperations.Log2((uint)size) - 2;
+                        if (bitDepth == 8)
+                        {
+                            if (size == 4 && isIntra) X265.X265Primitives.Idst4Simd(c, o, 4);
+                            else X265.X265Primitives.IdctSimd(sizeIdx, c, o, size);
+                        }
+                        else
+                        {
+                            if (size == 4 && isIntra) X265.Hbd.X265Primitives.Idst4Simd(c, o, 4);
+                            else X265.Hbd.X265Primitives.IdctSimd(sizeIdx, c, o, size);
+                        }
+                    }
+                }
+
+                return;
+            }
+
             // HEVC spec 8.6.4.2: 2nd pass shift = 20 - BitDepth
             int shift2 = 20 - bitDepth;
             int add2 = 1 << (shift2 - 1);
