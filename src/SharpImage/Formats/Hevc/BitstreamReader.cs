@@ -43,7 +43,7 @@ namespace SharpImage.Formats.Hevc
         public uint ReadBit()
         {
             if (bytePosition >= data.Length)
-                throw new InvalidOperationException("Attempted to read past end of bitstream");
+                throw new InvalidDataException("Attempted to read past end of bitstream");
 
             uint bit = (uint)((data[bytePosition] >> (7 - bitPosition)) & 1);
 
@@ -68,7 +68,7 @@ namespace SharpImage.Formats.Hevc
                 throw new ArgumentOutOfRangeException(nameof(numberOfBits), "Must be 1-32");
 
             if (RemainingBits < numberOfBits)
-                throw new InvalidOperationException("Attempted to read past end of bitstream");
+                throw new InvalidDataException("Attempted to read past end of bitstream");
 
             uint result = 0;
 
@@ -134,7 +134,7 @@ namespace SharpImage.Formats.Hevc
             {
                 leadingZeroBits++;
                 if (leadingZeroBits > 31)
-                    throw new InvalidOperationException("Invalid exp-golomb code");
+                    throw new InvalidDataException("Invalid exp-golomb code");
             }
 
             if (leadingZeroBits == 0)
@@ -169,7 +169,7 @@ namespace SharpImage.Formats.Hevc
 
             int totalBitsAfterSkip = BitPosition + numberOfBits;
             if (totalBitsAfterSkip > TotalBits)
-                throw new InvalidOperationException("Attempted to skip past end of bitstream");
+                throw new InvalidDataException("Attempted to skip past end of bitstream");
 
             bytePosition = totalBitsAfterSkip / 8;
             bitPosition = totalBitsAfterSkip % 8;

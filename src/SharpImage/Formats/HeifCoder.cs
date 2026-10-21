@@ -3381,6 +3381,8 @@ public static partial class HeifCoder
         decoder.Initialize(hvcC);
         using var yuv = decoder.DecodeStill(codedData)
             ?? throw new InvalidDataException("HEVC alpha decode produced no frame.");
+        if (c.Ispe(id) != null && (yuv.Width != w || yuv.Height != h))
+            throw new InvalidDataException("Decoded alpha image does not have the size signaled in the file.");
         // deeper samples scaled to 16 bits as heif-dec writes them (v << s | v >> (16 - s), s = 16 - depth)
         int bpp = decoder.DiagActiveSps?.BitDepthLuma ?? 8, outShift = 16 - bpp;
         if (!frame.HasAlpha) frame.SetAlpha(true);
@@ -3418,6 +3420,9 @@ public static partial class HeifCoder
             ?? throw new InvalidDataException("HEVC decode produced no frame.");
 
         var sps = decoder.DiagActiveSps ?? throw new InvalidDataException("HEVC stream without an SPS.");
+        // libheif ImageItem::check_decoded_image_size: the picture must have the size the item's ispe signals
+        if (yuv.Width != frame.Columns || yuv.Height != frame.Rows)
+            throw new InvalidDataException("Decoded image does not have the size signaled in the file.");
         var nclx = HevcNclx(colr, sps);
         frame.Metadata.Cicp ??= new SharpImage.Metadata.CicpInfo(nclx.Cp, nclx.Tc, nclx.Mc, nclx.Full);
         ConvertHevcPicture(yuv, sps, nclx, frame);

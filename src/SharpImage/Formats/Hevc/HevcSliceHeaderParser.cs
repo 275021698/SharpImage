@@ -78,6 +78,9 @@ public static class HevcSliceHeaderParser
                 if (addressBits > 0)
                 {
                     slice.SliceSegmentAddress = (int)reader.ReadBits(addressBits);
+                    // FFmpeg hls_slice_header: an address past the picture is invalid data
+                    if (slice.SliceSegmentAddress >= picSizeInCtbs)
+                        throw new InvalidDataException($"Invalid slice segment address: {slice.SliceSegmentAddress}.");
                 }
 
                 // For dependent slices: inherit ALL fields from the previous independent
