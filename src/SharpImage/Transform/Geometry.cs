@@ -39,6 +39,7 @@ public static class Geometry
         int channels = source.NumberOfChannels;
         var result = new ImageFrame();
         result.Initialize(width, height, source.Colorspace, source.HasAlpha);
+        result.Metadata = source.Metadata.Clone();
 
         for (int row = 0;row < height;row++)
         {
@@ -64,6 +65,7 @@ public static class Geometry
 
         var result = new ImageFrame();
         result.Initialize(width, height, source.Colorspace, source.HasAlpha);
+        result.Metadata = source.Metadata.Clone();
 
         for (int y = 0;y < height;y++)
         {
@@ -86,6 +88,7 @@ public static class Geometry
 
         var result = new ImageFrame();
         result.Initialize(width, height, source.Colorspace, source.HasAlpha);
+        result.Metadata = source.Metadata.Clone();
 
         for (int y = 0;y < height;y++)
         {
@@ -129,6 +132,7 @@ public static class Geometry
         // 90° CW: new dimensions are (height, width)
         var result = new ImageFrame();
         result.Initialize(srcHeight, srcWidth, source.Colorspace, source.HasAlpha);
+        result.Metadata = source.Metadata.Clone();
 
         // Flat whole-buffer spans + index math — a transpose is inherently strided, so fetching a
         // row span per pixel (the old code) cost ~W*H span allocations. Source(x, y) → Dest(x, srcHeight-1-y).
@@ -163,6 +167,7 @@ public static class Geometry
 
         var result = new ImageFrame();
         result.Initialize(width, height, source.Colorspace, source.HasAlpha);
+        result.Metadata = source.Metadata.Clone();
 
         for (int y = 0;y < height;y++)
         {
@@ -192,6 +197,7 @@ public static class Geometry
         // 270° CW (= 90° CCW): new dimensions are (height, width)
         var result = new ImageFrame();
         result.Initialize(srcHeight, srcWidth, source.Colorspace, source.HasAlpha);
+        result.Metadata = source.Metadata.Clone();
 
         // Flat whole-buffer spans + index math (see Rotate90). Source(x, y) → Dest(y, srcWidth-1-x).
         var src = source.GetAllPixels();
@@ -350,6 +356,7 @@ public static class Geometry
 
         var result = new ImageFrame();
         result.Initialize(newWidth, newHeight, source.Colorspace, source.HasAlpha);
+        result.Metadata = source.Metadata.Clone();
 
         // Fill background — always fill so RGBA images get opaque alpha on new areas
         for (int y = 0; y < newHeight; y++)
@@ -444,6 +451,7 @@ public static class Geometry
 
         var result = new ImageFrame();
         result.Initialize(newWidth, newHeight, source.Colorspace, source.HasAlpha);
+        result.Metadata = source.Metadata.Clone();
 
         int dstY = 0;
         for (int srcY = 0; srcY < srcHeight; srcY++)
@@ -491,6 +499,7 @@ public static class Geometry
 
         var result = new ImageFrame();
         result.Initialize(srcHeight, srcWidth, source.Colorspace, source.HasAlpha);
+        result.Metadata = source.Metadata.Clone();
 
         for (int y = 0; y < srcHeight; y++)
         {
@@ -523,6 +532,7 @@ public static class Geometry
 
         var result = new ImageFrame();
         result.Initialize(srcHeight, srcWidth, source.Colorspace, source.HasAlpha);
+        result.Metadata = source.Metadata.Clone();
 
         for (int y = 0; y < srcHeight; y++)
         {
@@ -686,6 +696,7 @@ public static class Geometry
 
         var result = new ImageFrame();
         result.Initialize(newWidth, newHeight, source.Colorspace, source.HasAlpha);
+        result.Metadata = source.Metadata.Clone();
 
         // Inverse mapping: for each destination pixel, find source coordinate
         Parallel.For(0, newHeight, y =>
@@ -771,6 +782,7 @@ public static class Geometry
 
         var result = new ImageFrame();
         result.Initialize(newWidth, srcHeight, source.Colorspace, source.HasAlpha);
+        result.Metadata = source.Metadata.Clone();
 
         // Fill with background
         for (int y = 0; y < srcHeight; y++)
@@ -851,6 +863,7 @@ public static class Geometry
 
         var result = new ImageFrame();
         result.Initialize(srcWidth, newHeight, source.Colorspace, source.HasAlpha);
+        result.Metadata = source.Metadata.Clone();
 
         // Fill with background
         for (int y = 0; y < newHeight; y++)
@@ -934,6 +947,7 @@ public static class Geometry
             // No shift — clone
             var clone = new ImageFrame();
             clone.Initialize(width, height, source.Colorspace, source.HasAlpha);
+            clone.Metadata = source.Metadata.Clone();
             for (int y = 0; y < height; y++)
             {
                 source.GetPixelRow(y).CopyTo(clone.GetPixelRowForWrite(y));
@@ -943,6 +957,7 @@ public static class Geometry
 
         var result = new ImageFrame();
         result.Initialize(width, height, source.Colorspace, source.HasAlpha);
+        result.Metadata = source.Metadata.Clone();
 
         Parallel.For(0, height, srcY =>
         {
@@ -989,6 +1004,7 @@ public static class Geometry
 
         var result = new ImageFrame();
         result.Initialize(newWidth, newHeight, source.Colorspace, source.HasAlpha);
+        result.Metadata = source.Metadata.Clone();
 
         // Fill the entire result with the fill color first
         for (int y = 0; y < newHeight; y++)
@@ -1057,9 +1073,11 @@ public static class Geometry
             int w = (int)source.Columns, h = (int)source.Rows;
             var clone = new ImageFrame();
             clone.Initialize(w, h, source.Colorspace, source.HasAlpha);
+            clone.Metadata = source.Metadata.Clone();
             for (int y = 0; y < h; y++)
                 source.GetPixelRow(y).CopyTo(clone.GetPixelRowForWrite(y));
             clone.Orientation = OrientationType.TopLeft;
+            ResetExifOrientation(clone);
             return clone;
         }
 
@@ -1076,7 +1094,18 @@ public static class Geometry
         };
 
         result.Orientation = OrientationType.TopLeft;
+        ResetExifOrientation(result);
         return result;
+    }
+
+    // The pixels are now upright: a kept Exif orientation tag must say so, or viewers would rotate them again.
+    private static void ResetExifOrientation(ImageFrame frame)
+    {
+        if (frame.Metadata.ExifProfile is { } exif && exif.GetTag(SharpImage.Metadata.ExifTag.Orientation) is { } ot)
+        {
+            byte[] one = exif.IsLittleEndian ? [1, 0] : [0, 1];
+            exif.SetTag(new SharpImage.Metadata.ExifEntry { Tag = ot.Tag, DataType = SharpImage.Metadata.ExifDataType.Short, Count = 1, Value = one });
+        }
     }
 
     /// <summary>

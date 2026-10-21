@@ -36,20 +36,57 @@ internal static partial class JxlEncoder
     /// for the leading (coarse) passes in DECREASING order; a final full-precision (shift 0) pass is
     /// appended automatically. E.g. [2,1] => 3 passes with shifts {2,1,0}. Null/empty => a single pass.
     /// </summary>
-    public static byte[] EncodeVarDct(ImageFrame image, uint globalScale = 4096, uint quantLf = 32, uint blockHfMul = 1, int[]? passShifts = null, bool adaptiveQuant = false, bool variableBlocks = false, bool perceptual = false, float distance = 1.0f, float[]? quantFieldOverride = null, int[]? layoutOverride = null, int bits = 8)
+    public static byte[] EncodeVarDct(ImageFrame image, uint globalScale = 4096, uint quantLf = 32, uint blockHfMul = 1, int[]? passShifts = null, bool adaptiveQuant = false, bool variableBlocks = false, bool perceptual = false, float distance = 1.0f, float[]? quantFieldOverride = null, int[]? layoutOverride = null, int bits = 8) =>
+        EncodeVarDct(VarDctSource.From(image, bits), globalScale, quantLf, blockHfMul, passShifts, adaptiveQuant, variableBlocks, perceptual, distance, quantFieldOverride, layoutOverride, null);
+
+    // The encoder's view of an image: sRGB-referred float planes (converted from the image's colour space, see
+    // JxlXybColor), alpha, and the colour encoding the codestream declares.
+    private sealed class VarDctSource
     {
-        int w = (int)image.Columns;
-        int h = (int)image.Rows;
-        if (w <= 0 || h <= 0)
+        public int W, H, Bits;
+        public float[][] Srgb = null!;
+        public int[]? Alpha;
+        public JxlXybColor Color = null!;
+
+        public static VarDctSource From(ImageFrame image, int bits)
         {
-            throw new InvalidOperationException("Cannot encode an empty image.");
+            int w = (int)image.Columns;
+            int h = (int)image.Rows;
+            if (w <= 0 || h <= 0)
+            {
+                throw new InvalidOperationException("Cannot encode an empty image.");
+            }
+
+            float[][] planes = ExtractSrgb(image, w, h, bits);
+            bool contentGray = true;
+            for (int i = 0; i < w * h && contentGray; i++)
+            {
+                contentGray = planes[0][i] == planes[1][i] && planes[1][i] == planes[2][i];
+            }
+
+            JxlXybColor color = JxlXybColor.Plan(image, contentGray);
+            return new VarDctSource
+            {
+                W = w,
+                H = h,
+                Bits = bits,
+                Srgb = color.ToSrgbReferred(planes, w, h),
+                Alpha = ExtractAlpha(image, w, h),
+                Color = color,
+            };
         }
+    }
+
+    // meta: the colour encoding to declare (null: the source's own).
+    private static byte[] EncodeVarDct(VarDctSource src, uint globalScale, uint quantLf, uint blockHfMul, int[]? passShifts, bool adaptiveQuant, bool variableBlocks, bool perceptual, float distance, float[]? quantFieldOverride, int[]? layoutOverride, JxlXybColor? meta)
+    {
+        int w = src.W, h = src.H;
 
         // Full per-pass shift list: the caller's coarse shifts followed by the mandatory final shift 0.
         int[] shifts = BuildPassShifts(passShifts);
 
-        float[][] srgb = ExtractSrgb(image, w, h, bits);
-        int[]? alpha = ExtractAlpha(image, w, h);
+        float[][] srgb = src.Srgb;
+        int[]? alpha = src.Alpha;
 
         // Alpha placement: a single-group image (<= 256px) codes the whole channel in the GlobalModular
         // stream; a larger image splits it into per-group ModularAC tiles appended to each PassGroup section.
@@ -61,9 +98,8 @@ internal static partial class JxlEncoder
             alpha = null;
         }
 
-        Core.ColorspaceType colorspace = image.Colorspace;
-        List<byte[]> sections = BuildVarDctSections(srgb, w, h, globalScale, quantLf, blockHfMul, shifts, adaptiveQuant, variableBlocks, perceptual, distance, quantFieldOverride, layoutOverride, alpha, colorspace);
-        return AssembleVarDctCodestream(w, h, sections, shifts, gaborish: perceptual, epfIters: 0, hasAlpha: alpha != null, bits: bits, colorspace: colorspace, icc: image.IccProfile);
+        List<byte[]> sections = BuildVarDctSections(srgb, w, h, globalScale, quantLf, blockHfMul, shifts, adaptiveQuant, variableBlocks, perceptual, distance, quantFieldOverride, layoutOverride, alpha, src.Color.IntensityTarget);
+        return AssembleVarDctCodestream(w, h, sections, shifts, gaborish: perceptual, epfIters: 0, hasAlpha: alpha != null, bits: src.Bits, color: meta ?? src.Color);
     }
 
     // The alpha channel (last channel) as 8-bit values, or null if the image is opaque. Alpha is coded as a
@@ -155,9 +191,9 @@ internal static partial class JxlEncoder
         int w = (int)image.Columns, h = (int)image.Rows;
         (uint gs, uint qlf, uint hfm) = QuantForDistance(distance);
         int bw = (w + 7) / 8, bh = (h + 7) / 8, stride = bw * 8, strideH = bh * 8;
-        var fp = new VarDctFrameParams();
-
-        float[][] srgb0 = ExtractSrgb(image, w, h);
+        VarDctSource src = VarDctSource.From(image, 8);
+        var fp = new VarDctFrameParams { IntensityTarget = src.Color.IntensityTarget };
+        float[][] srgb0 = src.Srgb;
         float[][] lin0 = ToLinear(srgb0, w, h);
         float[][] xyb0 = PadToXyb(srgb0, w, h, stride, strideH, fp);
 
@@ -181,10 +217,12 @@ internal static partial class JxlEncoder
         }
 
         byte[] bestCs = null!;
+        float[] bestField = quantField;
         double bestScore = double.NegativeInfinity;
         for (int it = 0; it <= iters; it++)
         {
-            byte[] cs = EncodeVarDct(image, gs, qlf, hfm, passShifts, false, true, perceptual: perceptual, distance: distance, quantFieldOverride: quantField, layoutOverride: layout);
+            // Scored as sRGB (the planes are sRGB-referred); the real colour encoding goes on the final codestream.
+            byte[] cs = EncodeVarDct(src, gs, qlf, hfm, passShifts, false, true, perceptual, distance, quantField, layout, src.Color.Scoring);
 
             // Decode our own output and score it with the (ssimulacra2_rs-validated) metric; keep the best
             // codestream across iterations (the equalisation peaks then overshoots).
@@ -195,6 +233,7 @@ internal static partial class JxlEncoder
             {
                 bestScore = myScore;
                 bestCs = cs;
+                bestField = (float[])quantField.Clone();
             }
 
             if (it == iters)
@@ -276,7 +315,7 @@ internal static partial class JxlEncoder
             }
         }
 
-        return bestCs;
+        return src.Color.IsPlainSrgb ? bestCs : EncodeVarDct(src, gs, qlf, hfm, passShifts, false, true, perceptual, distance, bestField, layout, null);
     }
 
     /// <summary>
@@ -291,8 +330,9 @@ internal static partial class JxlEncoder
         int w = (int)image.Columns, h = (int)image.Rows;
         (uint gs, uint qlf, uint hfm) = QuantForDistance(distance);
         int bw = (w + 7) / 8, bh = (h + 7) / 8, stride = bw * 8, strideH = bh * 8;
-        var fp = new VarDctFrameParams();
-        float[][] srgb0 = ExtractSrgb(image, w, h);
+        VarDctSource src = VarDctSource.From(image, 8);
+        var fp = new VarDctFrameParams { IntensityTarget = src.Color.IntensityTarget };
+        float[][] srgb0 = src.Srgb;
         float[][] lin0 = ToLinear(srgb0, w, h);
         float[][] xyb0 = PadToXyb(srgb0, w, h, stride, strideH, fp);
         var dm = DequantMatrixSet.Default();
@@ -301,10 +341,11 @@ internal static partial class JxlEncoder
         int[] layout = BuildDctLayout(xyb0, stride, dm, gs, null!, hfm, false, fp, bw, bh, true);
 
         byte[] bestCs = null!;
+        int[] bestLayout = layout;
         double bestScore = double.NegativeInfinity;
         for (int it = 0; it <= iters; it++)
         {
-            byte[] cs = EncodeVarDct(image, gs, qlf, hfm, passShifts, false, true, perceptual: false, distance: distance, quantFieldOverride: null, layoutOverride: layout);
+            byte[] cs = EncodeVarDct(src, gs, qlf, hfm, passShifts, false, true, false, distance, null, layout, src.Color.Scoring);
             JxlModularResult dec = JxlFrame.DecodeModularCodestream(cs);
             float[][] linDec = DecodedToLinear(dec, w, h);
             var (score, dist) = JxlEncoderSsimulacra.Compute(lin0, linDec, w, h, bw, bh, fp);
@@ -312,6 +353,7 @@ internal static partial class JxlEncoder
             {
                 bestScore = score;
                 bestCs = cs;
+                bestLayout = (int[])layout.Clone();
             }
 
             if (it == iters)
@@ -380,7 +422,7 @@ internal static partial class JxlEncoder
             }
         }
 
-        return bestCs;
+        return src.Color.IsPlainSrgb ? bestCs : EncodeVarDct(src, gs, qlf, hfm, passShifts, false, true, false, distance, null, bestLayout, null);
     }
 
     // sRGB [0,1] planes -> linear RGB planes (w*h), for the SSIMULACRA2 metric.
@@ -528,13 +570,13 @@ internal static partial class JxlEncoder
     // For a single-group single-pass frame the whole body is one TOC section; a progressive (multi-pass)
     // frame uses the multi-section TOC (LfGlobal | LfGroup | HfGlobal | PassGroup-per-pass) so a streaming
     // decoder can render the DC preview from the LfGroup section before the AC passes arrive.
-    private static byte[] AssembleVarDctCodestream(int w, int h, List<byte[]> sections, int[] shifts, bool gaborish, int epfIters = 0, bool hasAlpha = false, int bits = 8, Core.ColorspaceType colorspace = Core.ColorspaceType.SRGB, byte[]? icc = null)
+    private static byte[] AssembleVarDctCodestream(int w, int h, List<byte[]> sections, int[] shifts, bool gaborish, int epfIters, bool hasAlpha, int bits, JxlXybColor color)
     {
         var main = new JxlBitWriter();
         main.WriteBits(0xFF, 8);
         main.WriteBits(0x0A, 8);
         WriteSizeHeader(main, w, h);
-        WriteXybImageMetadata(main, hasAlpha, bits, colorspace, icc);
+        color.WriteImageHeader(main, hasAlpha, bits);
         main.JumpToByteBoundary();
         WriteVarDctFrameHeader(main, shifts, gaborish, epfIters, hasAlpha ? 1 : 0);
         main.WriteBool(false); // permuted TOC = false
@@ -552,57 +594,6 @@ internal static partial class JxlEncoder
         }
 
         return main.ToArray();
-    }
-
-    // Explicit ImageMetadata: 8-bit sRGB RGB, XYB-encoded, no extra channels, default opsin/upsampling.
-    // Written out in full (not all_default) so xyb_encoded is unambiguously set for the decoder.
-    private static void WriteXybImageMetadata(JxlBitWriter w, bool hasAlpha = false, int bits = 8, Core.ColorspaceType colorspace = Core.ColorspaceType.SRGB, byte[]? icc = null)
-    {
-        w.WriteBool(false); // not all_default
-        w.WriteBool(false); // extra_fields = false
-        w.WriteBool(false); // bit depth: not floating
-        w.WriteU32((uint)bits, E.Val(8), E.Val(10), E.Val(12), E.BitsOff(6, 1)); // bits per sample (output depth)
-        w.WriteBool(true);  // modular_16bit_buffer_sufficient (XYB colour is float; alpha extra channel <= 16-bit)
-        w.WriteU32(hasAlpha ? 1u : 0u, E.Val(0), E.Val(1), E.BitsOff(4, 2), E.BitsOff(12, 1)); // num_extra_channels
-        if (hasAlpha)
-        {
-            w.WriteBool(true); // ExtraChannelInfo: all_default (8-bit unassociated Alpha, dim_shift 0)
-        }
-
-        w.WriteBool(true);  // xyb_encoded = true
-        if (icc != null)
-        {
-            // The embedded ICC profile is the authoritative target colour for XYB->RGB; only the colour-space
-            // kind is declared (kRGB), the enum primaries/transfer/intent are omitted. Blob follows the metadata.
-            w.WriteBool(false); // colour encoding: not all_default
-            w.WriteBool(true);  // want_icc = true
-            w.WriteEnum(0);     // color_space = kRGB
-        }
-        else if (colorspace == Core.ColorspaceType.DisplayP3)
-        {
-            // Target colour encoding for XYB->RGB: RGB / D65 / primaries kP3 / sRGB transfer.
-            w.WriteBool(false); // colour encoding: not all_default
-            w.WriteBool(false); // want_icc = false
-            w.WriteEnum(0);     // color_space = kRGB
-            w.WriteEnum(1);     // white_point = kD65
-            w.WriteEnum(11);    // primaries = kP3
-            w.WriteBool(false); // transfer: have_gamma = false
-            w.WriteEnum(13);    // transfer_function = kSRGB
-            w.WriteEnum(0);     // rendering_intent
-        }
-        else
-        {
-            w.WriteBool(true);  // colour encoding: all_default (sRGB RGB)
-        }
-
-        w.WriteU64(0);      // extensions = none
-        w.WriteBool(true);  // default_m (skip opsin / upsampling weights — use XYB defaults)
-
-        // The embedded ICC profile (if any) follows the whole ImageMetadata bundle, before the frames.
-        if (icc != null)
-        {
-            JxlIcc.EncodeStream(w, icc);
-        }
     }
 
     // Frame header for a regular XYB VarDCT frame with loop filters + adaptive-LF-smoothing disabled.
@@ -669,7 +660,7 @@ internal static partial class JxlEncoder
     }
 
     // --- the frame body as TOC sections (see AssembleVarDctCodestream) ---
-    private static List<byte[]> BuildVarDctSections(float[][] srgb, int w, int h, uint globalScale, uint quantLf, uint blockHfMul, int[] shifts, bool adaptiveQuant, bool variableBlocks, bool perceptual = false, float distance = 1.0f, float[]? quantFieldOverride = null, int[]? layoutOverride = null, int[]? alpha = null, Core.ColorspaceType colorspace = Core.ColorspaceType.SRGB)
+    private static List<byte[]> BuildVarDctSections(float[][] srgb, int w, int h, uint globalScale, uint quantLf, uint blockHfMul, int[] shifts, bool adaptiveQuant, bool variableBlocks, bool perceptual = false, float distance = 1.0f, float[]? quantFieldOverride = null, int[]? layoutOverride = null, int[]? alpha = null, float intensityTarget = 255f)
     {
         int bw = (w + 7) / 8, bh = (h + 7) / 8;   // blocks
         int stride = bw * 8, strideH = bh * 8;
@@ -690,8 +681,9 @@ internal static partial class JxlEncoder
             }
         }
 
-        var fp = new VarDctFrameParams();
-        fp.SetPrimaries(colorspace); // wide-gamut: primaries conversion inside the XYB transform
+        // The planes are sRGB-referred (JxlXybColor converts other colour spaces); HDR content scales XYB by its
+        // intensity target as libjxl's premul_absorb does.
+        var fp = new VarDctFrameParams { IntensityTarget = intensityTarget };
         float[][] xyb = JxlVarDctEncoder.SrgbToXyb(padded, stride * strideH, fp);
 
         // Per-block forward DCT + quantisation. Modular DC channels are [Y, X, B]; default CfL adds +1*Y

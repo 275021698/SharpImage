@@ -93,14 +93,16 @@ internal static class JxlVarDctEncoder
 
     public static float SrgbToLinearPublic(float s) => SrgbToLinear(s);
 
+    // The sRGB curve extended to all reals (odd): sRGB-referred inputs converted from wider colour spaces carry
+    // out-of-gamut values below 0 and above 1, which XYB represents.
     private static float SrgbToLinear(float s)
     {
-        if (s <= 0f)
+        if (s < 0f)
         {
-            return 0f;
+            return -SrgbToLinear(-s);
         }
 
-        if (s >= 1f)
+        if (s == 1f)
         {
             return 1f;
         }

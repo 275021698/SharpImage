@@ -305,6 +305,7 @@ public static class Montage
     {
         var clone = new ImageFrame();
         clone.Initialize((int)source.Columns, (int)source.Rows, source.Colorspace, source.HasAlpha);
+        clone.Metadata = source.Metadata.Clone();
         CopyFrameData(source, clone);
         return clone;
     }

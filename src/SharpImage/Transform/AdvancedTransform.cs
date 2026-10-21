@@ -33,6 +33,7 @@ public static class AdvancedTransform
 
         var result = new ImageFrame();
         result.Initialize(width, height, source.Colorspace, source.HasAlpha);
+        result.Metadata = source.Metadata.Clone();
 
         // Copy source to result first
         for (int y = 0; y < height; y++)
@@ -118,6 +119,7 @@ public static class AdvancedTransform
         // High frequency = source - low + midgray (offset to avoid negative values)
         var highFreq = new ImageFrame();
         highFreq.Initialize(width, height, source.Colorspace, source.HasAlpha);
+        highFreq.Metadata = source.Metadata.Clone();
 
         int midgray = Quantum.MaxValue / 2;
 
@@ -160,6 +162,7 @@ public static class AdvancedTransform
 
         var result = new ImageFrame();
         result.Initialize(width, height, lowFrequency.Colorspace, lowFrequency.HasAlpha);
+        result.Metadata = lowFrequency.Metadata.Clone();
 
         int midgray = Quantum.MaxValue / 2;
 
@@ -376,6 +379,7 @@ public static class AdvancedTransform
         int height = (int)source.Rows;
         var clone = new ImageFrame();
         clone.Initialize(width, height, source.Colorspace, source.HasAlpha);
+        clone.Metadata = source.Metadata.Clone();
         for (int y = 0; y < height; y++)
         {
             var srcRow = source.GetPixelRow(y);

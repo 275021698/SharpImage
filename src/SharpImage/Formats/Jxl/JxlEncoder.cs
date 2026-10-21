@@ -12,6 +12,8 @@ using SharpImage.Core;
 using SharpImage.Image;
 using E = SharpImage.Formats.Jxl.JxlBitReader.U32Enc;
 
+using SharpImage.Formats.Jxl.Lj;
+
 namespace SharpImage.Formats.Jxl;
 
 internal static partial class JxlEncoder
@@ -213,31 +215,32 @@ internal static partial class JxlEncoder
             }
         }
 
-        // Grayscale (r == g == b everywhere) encodes as a single channel with no colour transform,
-        // matching libjxl. For a small (single-group) grayscale image also try the RGB encoding and keep
-        // whichever is smaller (a few-colour grey palette can occasionally beat the 1-channel form by a
-        // byte); larger grayscale images just take the 1-channel form (skips a redundant full encode).
-        // Alpha images take the colour (RGBA) path so the decoded result is [R,G,B,A]; grayscale-with-alpha
-        // is rare and the extra colour channels cost little.
-        Core.ColorspaceType colorspace = image.Colorspace;
-        byte[]? icc = image.IccProfile;
-        bool gray = alpha == null && IsGrayscale(r, g, b, w * h);
-        if (!gray)
-        {
-            return EncodeCore(r, g, b, w, h, nb, gray: false, bits, alpha, colorspace, icc, profile);
-        }
+        // Grayscale (r == g == b everywhere) encodes as a single gray channel (plus alpha) with no colour
+        // transform, as libjxl does for grayscale input, when the colour description allows it.
+        (LjColorEncoding enc, byte[]? icc) = LosslessColor(image, IsGrayscale(r, g, b, w * h));
+        return EncodeCore(r, g, b, w, h, nb, gray: LjCe.IsGray(enc), bits, alpha, enc, icc, profile);
+    }
 
-        byte[] grayCs = EncodeCore(r, g, b, w, h, nb, gray: true, bits, alpha, colorspace, icc, profile);
-        if (w <= GroupDim && h <= GroupDim && alpha == null)
+    // The colour encoding of a lossless (non-XYB) codestream. Its samples are the image's own, so its own colour
+    // description is declared: the ICC profile, kept byte for byte (uses_original_profile, as cjxl does for
+    // lossless), else CICP tags or the colour space as enumerated fields. A gray codestream needs a gray (or no)
+    // profile; a gray profile on colour content, or a CMYK one (the samples are RGB), is not embedded.
+    internal static (LjColorEncoding Enc, byte[]? Icc) LosslessColor(ImageFrame image, bool contentGray)
+    {
+        if (image.IccProfile is { Length: >= 20 } iccBytes)
         {
-            byte[] rgbCs = EncodeCore(r, g, b, w, h, nb, gray: false, bits, alpha, colorspace, icc, profile);
-            if (rgbCs.Length < grayCs.Length)
+            string kind = System.Text.Encoding.ASCII.GetString(iccBytes, 16, 4);
+            if (kind == "RGB " || (kind == "GRAY" && contentGray))
             {
-                return rgbCs;
+                uint cs = kind == "GRAY" ? LjColorEncoding.CsGray : LjColorEncoding.CsRgb;
+                return (new LjColorEncoding { AllDefaultField = false, WantIcc = true, ColorSpace = cs }, iccBytes);
             }
         }
 
-        return grayCs;
+        LjColorEncoding? Map(bool gray) => image.Metadata.Cicp is { } cicp && image.Colorspace == Core.ColorspaceType.SRGB
+            ? JxlXybColor.FromCicp(cicp, gray)
+            : JxlXybColor.FromColorspace(image.Colorspace, gray);
+        return ((contentGray ? Map(true) : null) ?? Map(false) ?? LjCe.Srgb(false), null);
     }
 
     /// <summary>Encodes an animated image sequence as a single multi-frame lossless JPEG XL codestream
@@ -271,7 +274,8 @@ internal static partial class JxlEncoder
         main.WriteBits(0xFF, 8);
         main.WriteBits(0x0A, 8);
         WriteSizeHeader(main, w, h);
-        WriteImageMetadata(main, gray: false, bits, numExtra, animation: true, numLoops: (uint)Math.Max(0, seq.LoopCount));
+        (LjColorEncoding animEnc, byte[]? animIcc) = LosslessColor(frames[0], contentGray: false);
+        WriteImageMetadata(main, animEnc, animIcc, bits, numExtra, animation: true, numLoops: (uint)Math.Max(0, seq.LoopCount));
         main.JumpToByteBoundary();
 
         for (int i = 0; i < frames.Count; i++)
@@ -324,10 +328,10 @@ internal static partial class JxlEncoder
         return (r, g, b, alpha);
     }
 
-    private static byte[] EncodeCore(int[] r, int[] g, int[] b, int w, int h, int nb, bool gray, int bits = 8, int[]? alpha = null, Core.ColorspaceType colorspace = Core.ColorspaceType.SRGB, byte[]? icc = null, LosslessProfile? profile = null)
+    private static byte[] EncodeCore(int[] r, int[] g, int[] b, int w, int h, int nb, bool gray, int bits, int[]? alpha, LjColorEncoding enc, byte[]? icc, LosslessProfile? profile = null)
     {
         var (sections, shift) = EncodeCoreSections(r, g, b, w, h, nb, gray, bits, alpha, profile);
-        return AssembleCodestream(w, h, shift, sections, gray, bits, alpha != null ? 1 : 0, colorspace, icc);
+        return AssembleCodestream(w, h, shift, sections, bits, alpha != null ? 1 : 0, enc, icc);
     }
 
     // Returns the frame's Modular sections + the group-size shift (the caller assembles them into a single-
@@ -440,13 +444,13 @@ internal static partial class JxlEncoder
     /// <summary>A modular channel to encode: pixel data with its own dimensions.</summary>
     private readonly record struct EncChannel(int[] Data, int W, int H);
 
-    private static byte[] AssembleCodestream(int w, int h, int shift, byte[][] sections, bool gray = false, int bits = 8, int numExtra = 0, Core.ColorspaceType colorspace = Core.ColorspaceType.SRGB, byte[]? icc = null)
+    private static byte[] AssembleCodestream(int w, int h, int shift, byte[][] sections, int bits, int numExtra, LjColorEncoding enc, byte[]? icc)
     {
         var main = new JxlBitWriter();
         main.WriteBits(0xFF, 8);
         main.WriteBits(0x0A, 8);
         WriteSizeHeader(main, w, h);
-        WriteImageMetadata(main, gray, bits, numExtra, colorspace: colorspace, icc: icc);
+        WriteImageMetadata(main, enc, icc, bits, numExtra);
         main.JumpToByteBoundary();
         WriteFrameBody(main, shift, sections, numExtra, isLast: true, durationTicks: 0);
         return main.ToArray();
@@ -496,7 +500,7 @@ internal static partial class JxlEncoder
         w.WriteU32((uint)width, E.BitsOff(9, 1), E.BitsOff(13, 1), E.BitsOff(18, 1), E.BitsOff(30, 1));
     }
 
-    private static void WriteImageMetadata(JxlBitWriter w, bool gray, int bits = 8, int numExtra = 0, bool animation = false, uint numLoops = 0, Core.ColorspaceType colorspace = Core.ColorspaceType.SRGB, byte[]? icc = null)
+    private static void WriteImageMetadata(JxlBitWriter w, LjColorEncoding enc, byte[]? icc, int bits = 8, int numExtra = 0, bool animation = false, uint numLoops = 0)
     {
         w.WriteBool(false); // not all_default
         w.WriteBool(animation); // extra_fields (only needed to carry animation)
@@ -539,7 +543,7 @@ internal static partial class JxlEncoder
         }
 
         w.WriteBool(false); // xyb_encoded = false
-        WriteColourEncoding(w, gray, colorspace, wantIcc: icc != null);
+        JxlXybColor.WriteBits(w, lw => LjFields.Write(enc, lw)); // ColorEncoding (fields, or an ICC's colour space)
 
         if (animation)
         {
@@ -552,69 +556,8 @@ internal static partial class JxlEncoder
         // The embedded ICC profile (if any) is written after the whole ImageMetadata bundle, before the frames.
         if (icc != null)
         {
-            JxlIcc.EncodeStream(w, icc);
+            JxlXybColor.WriteBits(w, lw => LjIccEncoder.WriteIcc(icc, lw));
         }
-    }
-
-    // Writes the colour encoding for a lossless (non-XYB) frame. sRGB is all_default; grayscale and the
-    // enum-representable wide-gamut spaces (Display P3, linear sRGB) are written explicitly so the pixels
-    // (stored as-is, losslessly) are declared in the right space. TransferFunction kSRGB=13, kLinear=8;
-    // WhitePoint kD65=1; Primaries kSRGB=1, kP3=11; ColorSpace kRGB=0, kGray=1; RenderingIntent kRelative=0.
-    // Adobe RGB (1998) primaries (x,y) — white D65, encoding gamma 563/256.
-    private static readonly double[] Adobe98Primaries = { 0.64, 0.33, 0.21, 0.71, 0.15, 0.06 };
-
-    private static void WriteColourEncoding(JxlBitWriter w, bool gray, Core.ColorspaceType colorspace, bool wantIcc = false)
-    {
-        if (wantIcc)
-        {
-            // The embedded ICC profile is authoritative; only the colour-space kind is still declared (RGB /
-            // Gray), the enum primaries/transfer/intent are omitted. The profile bytes follow the metadata.
-            w.WriteBool(false);                 // not all_default
-            w.WriteBool(true);                  // want_icc = true
-            w.WriteEnum((uint)(gray ? 1 : 0));  // color_space (kGray / kRGB)
-            return;
-        }
-
-        bool linear = colorspace == Core.ColorspaceType.LinearGray || colorspace == Core.ColorspaceType.ScRGB;
-        bool adobe = colorspace == Core.ColorspaceType.Adobe98;
-        int primaries = colorspace == Core.ColorspaceType.DisplayP3 ? 11 : (adobe ? 2 : 1); // kP3 / kCustom / kSRGB
-        int transfer = linear ? 8 : 13; // kLinear else kSRGB
-
-        // sRGB RGB with the sRGB transfer is exactly all_default.
-        if (!gray && primaries == 1 && transfer == 13)
-        {
-            w.WriteBool(true); // all_default (sRGB RGB)
-            return;
-        }
-
-        w.WriteBool(false); // not all_default
-        w.WriteBool(false); // want_icc = false
-        w.WriteEnum((uint)(gray ? 1 : 0));   // color_space (kGray / kRGB)
-        w.WriteEnum(1);                       // white_point = kD65
-        if (!gray)
-        {
-            w.WriteEnum((uint)primaries);     // primaries (only present for RGB)
-            if (primaries == 2)               // kCustom => write the three (x,y) chromaticities
-            {
-                for (int i = 0; i < 6; i++)
-                {
-                    WriteCustomXy(w, Adobe98Primaries[i]);
-                }
-            }
-        }
-
-        if (adobe)
-        {
-            w.WriteBool(true); // have_gamma
-            w.WriteBits((uint)Math.Round(1e7 / (563.0 / 256.0)), 24); // inverted encoding gamma (~4547069)
-        }
-        else
-        {
-            w.WriteBool(false);               // have_gamma = false
-            w.WriteEnum((uint)transfer);      // transfer_function
-        }
-
-        w.WriteEnum(0);                       // rendering_intent
     }
 
     // Chromaticity coordinate: PackSigned(round(xy * 1e6)) via the Customxy U32 encoding.

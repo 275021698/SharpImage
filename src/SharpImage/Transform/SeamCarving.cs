@@ -348,6 +348,7 @@ public static class SeamCarving
 
         var result = new ImageFrame();
         result.Initialize(newWidth, height, source.Colorspace, source.HasAlpha);
+        result.Metadata = source.Metadata.Clone();
 
         Parallel.For(0, height, y =>
         {
@@ -383,6 +384,7 @@ public static class SeamCarving
 
         var result = new ImageFrame();
         result.Initialize(width, newHeight, source.Colorspace, source.HasAlpha);
+        result.Metadata = source.Metadata.Clone();
 
         for (int x = 0; x < width; x++)
         {
@@ -418,6 +420,7 @@ public static class SeamCarving
 
         var clone = new ImageFrame();
         clone.Initialize(width, height, source.Colorspace, source.HasAlpha);
+        clone.Metadata = source.Metadata.Clone();
 
         for (int y = 0; y < height; y++)
         {

@@ -36,10 +36,14 @@ public class ImageFrame : IDisposable
 
     /// <summary>
     /// Optional embedded ICC colour profile (raw bytes). When present, it is the authoritative colour
-    /// description and overrides <see cref="Colorspace"/>. Codecs that support it (e.g. JPEG XL) preserve it
-    /// on decode and re-embed it on encode.
+    /// description and overrides <see cref="Colorspace"/>. Codecs that support it preserve it on decode and
+    /// re-embed it on encode. The same profile as <see cref="ImageMetadata.IccProfile"/> of <see cref="Metadata"/>.
     /// </summary>
-    public byte[]? IccProfile { get; set; }
+    public byte[]? IccProfile
+    {
+        get => Metadata.IccProfile?.Data;
+        set => Metadata.IccProfile = value is { Length: > 0 } ? new global::SharpImage.Metadata.IccProfile(value) : null;
+    }
 
     /// <summary>
     /// Direct (true color) or Pseudo (palette-indexed).

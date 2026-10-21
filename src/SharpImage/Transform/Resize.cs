@@ -71,6 +71,7 @@ public static class Resize
 
         var result = new ImageFrame();
         result.Initialize(newWidth, newHeight, source.Colorspace, source.HasAlpha);
+        result.Metadata = source.Metadata.Clone();
 
         // Precompute source X indices for each destination column
         int[] srcXMap = new int[newWidth];
@@ -111,6 +112,7 @@ public static class Resize
 
         var result = new ImageFrame();
         result.Initialize(newWidth, newHeight, source.Colorspace, source.HasAlpha);
+        result.Metadata = source.Metadata.Clone();
 
         double xScale = (double)srcWidth / newWidth;
         double yScale = (double)srcHeight / newHeight;
@@ -169,6 +171,7 @@ public static class Resize
 
         var result = new ImageFrame();
         result.Initialize(newWidth, newHeight, source.Colorspace, source.HasAlpha);
+        result.Metadata = source.Metadata.Clone();
 
         double xRatio = (double)srcWidth / newWidth;
         double yRatio = (double)srcHeight / newHeight;
@@ -365,6 +368,7 @@ public static class Resize
             // Pass 2: Vertical resize — row-order accumulation for cache locality
             var result = new ImageFrame();
             result.Initialize(newWidth, newHeight, source.Colorspace, source.HasAlpha);
+            result.Metadata = source.Metadata.Clone();
 
             Parallel.For(0, newHeight, y =>
             {

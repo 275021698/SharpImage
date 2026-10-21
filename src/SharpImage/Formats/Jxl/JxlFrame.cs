@@ -147,17 +147,19 @@ internal static class JxlFrame
         return Core.ColorspaceType.SRGB;
     }
 
-    private static void ReadToneMapping(JxlBitReader br)
+    // ToneMapping: returns intensity_target (the XYB scale of an HDR image).
+    private static float ReadToneMapping(JxlBitReader br)
     {
         if (br.ReadBool())
         {
-            return; // all_default
+            return 255f; // all_default
         }
 
-        br.ReadF16();
+        float intensityTarget = br.ReadF16();
         br.ReadF16();
         br.ReadBool();
         br.ReadF16();
+        return intensityTarget;
     }
 
     private static void ReadExtensions(JxlBitReader br)
@@ -226,6 +228,7 @@ internal static class JxlFrame
         public bool Xyb = true, Gray;
         public bool HaveAnimation;
         public uint TpsNum = 1, TpsDenom = 1, NumLoops;
+        public float IntensityTarget = 255f;
         public Core.ColorspaceType Colorspace = Core.ColorspaceType.SRGB;
         public byte[]? IccProfile;
     }
@@ -276,7 +279,7 @@ internal static class JxlFrame
         md.Gray = md.Colorspace is Core.ColorspaceType.Gray or Core.ColorspaceType.LinearGray;
         if (extraFields)
         {
-            ReadToneMapping(br);
+            md.IntensityTarget = ReadToneMapping(br);
         }
 
         ReadExtensions(br);
@@ -680,6 +683,7 @@ internal static class JxlFrame
                 NumExtra = md.Extra,
             };
             fp.SetPrimaries(md.Colorspace); // wide-gamut XYB target primaries (e.g. Display P3)
+            fp.IntensityTarget = md.IntensityTarget;
             float[][] rgb = JxlVarDct.Decode(cs, offsets, sizes, fp, null, null, out int[][]? extra, allowTruncated);
             int maxV = (1 << md.Bps) - 1; // honor the declared output depth (e.g. 16-bit XYB files)
             var vc = new List<JxlChannel> { new(w, h), new(w, h), new(w, h) };

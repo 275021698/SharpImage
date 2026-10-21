@@ -1383,63 +1383,63 @@ public class JxlVarDctEncoderTests
         }
     }
 
-    // ICC on the LOSSY (VarDCT/XYB) path: a lossy encode carrying an embedded ICC profile round-trips the
-    // profile bytes exactly (the XYB frame declares want_icc + kRGB and re-embeds the compressed blob), and
-    // the reference decoders accept it (dumped to VARDCT_ICC_DIR for the external jxl-oxide/libjxl check).
+    // ICC on the LOSSY (VarDCT/XYB) path, as libjxl's encoder handles it: pixels are converted from the profile's
+    // space to linear sRGB through the CMS before XYB, and the profile is stored exactly only when enumerated
+    // fields cannot describe it (DecideIfWantICC); a describable profile (Display P3) becomes those fields, and
+    // bytes that are not a usable profile are not embedded at all.
     [Test]
     public async Task Jxl_Icc_Lossy_RoundTrips()
     {
         const int w = 96, h = 72;
-        var frame = new ImageFrame();
-        frame.Initialize(w, h, ColorspaceType.SRGB, false);
-        for (int y = 0; y < h; y++)
+        ImageFrame Make(byte[]? icc)
         {
-            var row = frame.GetPixelRowForWrite(y);
-            for (int x = 0; x < w; x++)
+            var frame = new ImageFrame();
+            frame.Initialize(w, h, ColorspaceType.SRGB, false);
+            for (int y = 0; y < h; y++)
             {
-                int o = x * 3;
-                row[o] = (ushort)(Math.Clamp(0.5f + (0.4f * MathF.Sin(x * 0.05f)), 0f, 1f) * Quantum.MaxValue);
-                row[o + 1] = (ushort)(Math.Clamp((float)y / (h - 1), 0f, 1f) * Quantum.MaxValue);
-                row[o + 2] = (ushort)(Math.Clamp(0.5f + (0.3f * MathF.Cos(y * 0.06f)), 0f, 1f) * Quantum.MaxValue);
+                var row = frame.GetPixelRowForWrite(y);
+                for (int x = 0; x < w; x++)
+                {
+                    int o = x * 3;
+                    row[o] = (ushort)(Math.Clamp(0.5f + (0.4f * MathF.Sin(x * 0.05f)), 0f, 1f) * Quantum.MaxValue);
+                    row[o + 1] = (ushort)(Math.Clamp((float)y / (h - 1), 0f, 1f) * Quantum.MaxValue);
+                    row[o + 2] = (ushort)(Math.Clamp(0.5f + (0.3f * MathF.Cos(y * 0.06f)), 0f, 1f) * Quantum.MaxValue);
+                }
             }
+
+            frame.IccProfile = icc;
+            return frame;
         }
 
-        // Prefer a real profile from the corpus dir (so a reference decoder can colour-manage); else synthetic.
-        string dir = Environment.GetEnvironmentVariable("VARDCT_ICC_DIR") ?? "";
-        string realIcc = System.IO.Path.Combine(dir, "srgb-rel.icc");
-        byte[] icc;
-        if (!string.IsNullOrEmpty(dir) && System.IO.File.Exists(realIcc))
-        {
-            icc = System.IO.File.ReadAllBytes(realIcc);
-        }
-        else
-        {
-            var rnd = new Random(23);
-            icc = new byte[400];
-            rnd.NextBytes(icc);
-            icc[0] = (byte)(icc.Length >> 24); icc[1] = (byte)(icc.Length >> 16);
-            icc[2] = (byte)(icc.Length >> 8); icc[3] = (byte)icc.Length;
-            System.Text.Encoding.ASCII.GetBytes("mntrRGB XYZ ").CopyTo(icc, 12);
-            System.Text.Encoding.ASCII.GetBytes("acsp").CopyTo(icc, 36);
-        }
+        string cms = System.IO.Path.Combine(AppContext.BaseDirectory, "TestAssets", "jxl", "cms");
 
-        frame.IccProfile = icc;
-        byte[] cs = SharpImage.Formats.JxlCoder.EncodeLossy(frame, quality: 90, effort: 7);
-
-        // The profile is stored in the codestream exactly. Decoded XYB pixels are rendered to sRGB (as libjxl does
-        // without a CMS), so the decoded frame does not carry the original profile.
+        // A table-based profile no enumerated encoding describes: stored exactly; XYB renders to sRGB on decode.
+        byte[] lut = System.IO.File.ReadAllBytes(System.IO.Path.Combine(cms, "icc_lut_srgb.icc"));
+        byte[] cs = SharpImage.Formats.JxlCoder.EncodeLossy(Make(lut), quality: 90, effort: 7);
         var lj = SharpImage.Formats.Jxl.Lj.LjDecoder.Decode(cs, 1);
         await Assert.That(lj.Icc).IsNotNull();
-        await Assert.That(lj.Icc!.AsSpan().SequenceEqual(icc)).IsTrue();
+        await Assert.That(lj.Icc!.AsSpan().SequenceEqual(lut)).IsTrue();
         ImageFrame dec = SharpImage.Formats.JxlCoder.Decode(cs);
         await Assert.That(dec.IccProfile).IsNull();
         await Assert.That(dec.Columns).IsEqualTo(w);
 
-        if (!string.IsNullOrEmpty(dir) && System.IO.Directory.Exists(dir))
-        {
-            System.IO.File.WriteAllBytes(System.IO.Path.Combine(dir, "lossy_icc.jxl"), cs);
-            System.IO.File.WriteAllBytes(System.IO.Path.Combine(dir, "lossy_icc.icc"), icc);
-        }
+        // libjxl's own Display P3 profile: written as the enumerated P3 encoding, decoded back to Display P3.
+        byte[] p3 = System.IO.File.ReadAllBytes(System.IO.Path.Combine(cms, "icc", "DisplayP3.icc"));
+        cs = SharpImage.Formats.JxlCoder.EncodeLossy(Make(p3), quality: 90, effort: 7);
+        lj = SharpImage.Formats.Jxl.Lj.LjDecoder.Decode(cs, 1);
+        await Assert.That(lj.Icc).IsNull();
+        await Assert.That(lj.State.Meta.ColorEncoding.Primaries).IsEqualTo(SharpImage.Formats.Jxl.Lj.LjColorEncoding.PrP3);
+        using ImageFrame decP3 = SharpImage.Formats.JxlCoder.Decode(cs);
+        await Assert.That(decP3.Colorspace).IsEqualTo(ColorspaceType.DisplayP3);
+
+        // Bytes that are not an ICC profile: not embedded (libjxl refuses them), the image still encodes as sRGB.
+        var rnd = new Random(23);
+        byte[] junk = new byte[400];
+        rnd.NextBytes(junk);
+        cs = SharpImage.Formats.JxlCoder.EncodeLossy(Make(junk), quality: 90, effort: 7);
+        lj = SharpImage.Formats.Jxl.Lj.LjDecoder.Decode(cs, 1);
+        await Assert.That(lj.Icc).IsNull();
+        await Assert.That(lj.State.Meta.ColorEncoding.WantIcc).IsFalse();
     }
 
     // Wide-gamut lossy (Display P3): the XYB transform converts P3<->sRGB primaries in linear light (JXL's

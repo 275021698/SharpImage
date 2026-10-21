@@ -154,6 +154,7 @@ public static class Distort
 
         var result = new ImageFrame();
         result.Initialize(outWidth, outHeight, source.Colorspace, source.HasAlpha);
+        result.Metadata = source.Metadata.Clone();
 
         for (int y = 0;y < (int)outHeight;y++)
         {
@@ -337,6 +338,7 @@ public static class Distort
 
         var result = new ImageFrame();
         result.Initialize(image.Columns, image.Rows, image.Colorspace, image.HasAlpha);
+        result.Metadata = image.Metadata.Clone();
 
         // Green channel stays at scale 1.0, red and blue get shifted
         double[] channelScales = [1.0 + redShift, 1.0, 1.0 + blueShift];
@@ -401,6 +403,7 @@ public static class Distort
 
         var result = new ImageFrame();
         result.Initialize(image.Columns, image.Rows, image.Colorspace, image.HasAlpha);
+        result.Metadata = image.Metadata.Clone();
 
         Parallel.For(0, height, y =>
         {
@@ -472,6 +475,7 @@ public static class Distort
         int height = (int)source.Rows;
         var result = new ImageFrame();
         result.Initialize(source.Columns, source.Rows, source.Colorspace, source.HasAlpha);
+        result.Metadata = source.Metadata.Clone();
         for (int y = 0; y < height; y++)
             source.GetPixelRow(y).CopyTo(result.GetPixelRowForWrite(y));
         return result;
