@@ -48,6 +48,9 @@ internal static unsafe class X265Encoder
 {
     private const int NAL_UNIT_VPS = 32, NAL_UNIT_SPS = 33, NAL_UNIT_PPS = 34;
 
+    /// <summary>Worker threads for the WPP rows (0: one per processor); the output does not depend on it.</summary>
+    internal static int MaxWorkers;
+
     /// <summary>
     /// Encodes one 8-bit picture (planes already padded by the caller to the size it passes, as libheif pads to
     /// even dimensions of at least 64) and returns the NAL units (VPS, SPS, PPS, slice) without start codes.
@@ -589,7 +592,7 @@ internal static unsafe class X265Encoder
         // one analysis (search state) per worker: WPP rows run in parallel, each CTU once the row above is two CTUs
         // ahead (x265's wavefront; the output does not depend on the thread count)
         bool parallelRows = p.bEnableWavefront && numRows > 1;
-        int workers = parallelRows ? Math.Max(1, Math.Min((int)numRows, Environment.ProcessorCount)) : 1;
+        int workers = parallelRows ? Math.Max(1, Math.Min((int)numRows, MaxWorkers > 0 ? MaxWorkers : Environment.ProcessorCount)) : 1;
         var analyses = new X265Analysis[workers];
         for (int i = 0; i < workers; i++)
         {

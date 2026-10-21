@@ -563,10 +563,7 @@ internal sealed unsafe class X265Quant
             uint c1 = 1;
             ushort* scan4 = X265Scan.Scan4x4[codeParams.scanType];
 
-            // coefficients after the last NZ have no distortion signal cost
-            int zeroCG = (int)cgNum - 1 - cgLastScanPos;
-            new Span<long>(&costCoeff[(cgLastScanPos + 1) << MLS_CG_SIZE], zeroCG * MLS_CG_BLK_SIZE).Clear();
-            new Span<long>(&costSig[(cgLastScanPos + 1) << MLS_CG_SIZE], zeroCG * MLS_CG_BLK_SIZE).Clear();
+            // (x265 zeroes costCoeff / costSig after the last coded group here; nothing reads those entries)
 
             // uncoded cost of the trailing all-zero groups
             for (int cgScanPos = cgLastScanPos + 1; cgScanPos < (int)cgNum; cgScanPos++)
@@ -870,7 +867,7 @@ internal sealed unsafe class X265Quant
                         uint blkPos0 = codeParams.scan[cgScanPos * cgSize];
                         for (int r = 0; r < 4; r++)
                         {
-                            new Span<short>(&dstCoeff[blkPos0 + (r * trSize)], 4).Clear();
+                            *(long*)&dstCoeff[blkPos0 + (r * trSize)] = 0;
                         }
                     }
                 }
@@ -982,7 +979,7 @@ internal sealed unsafe class X265Quant
                 uint blkPos = codeParams.scan[pos];
                 for (int r = 0; r < 4; r++)
                 {
-                    new Span<short>(&dstCoeff[blkPos + (r * trSize)], 4).Clear();
+                    *(long*)&dstCoeff[blkPos + (r * trSize)] = 0;
                 }
             }
 

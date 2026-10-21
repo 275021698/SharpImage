@@ -25,7 +25,7 @@ using sse_t = uint;
 #endif
 
 [SkipLocalsInit]
-internal static unsafe class X265Primitives
+internal static unsafe partial class X265Primitives
 {
     private const int BITS_PER_SUM = 8 * sizeof(sum_t);
 
@@ -681,6 +681,19 @@ internal static unsafe class X265Primitives
     /// <summary>primitives.cu[sizeIdx].dct.</summary>
     public static void Dct(int sizeIdx, short* src, short* dst, long srcStride)
     {
+        if (System.Runtime.Intrinsics.X86.Sse2.IsSupported)
+        {
+            DctSimd(sizeIdx, src, dst, srcStride);
+        }
+        else
+        {
+            DctScalar(sizeIdx, src, dst, srcStride);
+        }
+    }
+
+    // x265's C partial butterflies
+    internal static void DctScalar(int sizeIdx, short* src, short* dst, long srcStride)
+    {
         int n = 4 << sizeIdx;
         short* coef = stackalloc short[n * n];
         short* block = stackalloc short[n * n];
@@ -724,6 +737,19 @@ internal static unsafe class X265Primitives
 
     /// <summary>primitives.cu[sizeIdx].idct.</summary>
     public static void Idct(int sizeIdx, short* src, short* dst, long dstStride)
+    {
+        if (System.Runtime.Intrinsics.X86.Sse2.IsSupported)
+        {
+            IdctSimd(sizeIdx, src, dst, dstStride);
+        }
+        else
+        {
+            IdctScalar(sizeIdx, src, dst, dstStride);
+        }
+    }
+
+    // x265's C partial butterflies
+    internal static void IdctScalar(int sizeIdx, short* src, short* dst, long dstStride)
     {
         int n = 4 << sizeIdx;
         short* coef = stackalloc short[n * n];
