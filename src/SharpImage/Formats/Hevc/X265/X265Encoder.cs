@@ -665,7 +665,7 @@ internal static unsafe class X265Encoder
             {
                 ref int below = ref completed[Math.Min(row + 1, numRows - 1)];
                 var spin = new System.Threading.SpinWait();
-                while (System.Threading.Volatile.Read(ref below) < numCols && failure == null) spin.SpinOnce();
+                while (System.Threading.Volatile.Read(ref below) < numCols && failure == null) spin.SpinOnce(sleep1Threshold: -1);
                 if (failure != null) break;
                 FilterAndEncodeRow(row);
             }
@@ -693,7 +693,7 @@ internal static unsafe class X265Encoder
                     if (System.Threading.Volatile.Read(ref above) < need)
                     {
                         var spin = new System.Threading.SpinWait();
-                        while (System.Threading.Volatile.Read(ref above) < need) spin.SpinOnce();
+                        while (System.Threading.Volatile.Read(ref above) < need) spin.SpinOnce(sleep1Threshold: -1);
                     }
                 }
 

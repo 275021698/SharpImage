@@ -31,7 +31,7 @@ internal static unsafe partial class X265Primitives
 
     // ---- pixel comparisons ----
 
-    public static int Sad(pixel* pix1, long stride1, pixel* pix2, long stride2, int lx, int ly)
+    internal static int SadScalar(pixel* pix1, long stride1, pixel* pix2, long stride2, int lx, int ly)
     {
         int sum = 0;
         for (int y = 0; y < ly; y++)

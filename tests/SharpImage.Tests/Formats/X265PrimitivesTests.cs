@@ -138,6 +138,7 @@ public sealed class X265PrimitivesTests
             if (X265.X265Primitives.Satd4x4(a + o, 48, b, 48) != X265.X265Primitives.Satd4x4Scalar(a + o, 48, b, 48)) bad++;
             int n = 4 << (iter & 3);
             if (X265.X265Primitives.SsePP(a + o, 48, b, 48, n, n) != X265.X265Primitives.SsePPScalar(a + o, 48, b, 48, n, n)) bad++;
+            if (X265.X265Primitives.Sad(a + o, 48, b, 48, n, n) != X265.X265Primitives.SadScalar(a + o, 48, b, 48, n, n)) bad++;
         }
 
         return bad;
@@ -159,6 +160,7 @@ public sealed class X265PrimitivesTests
             if (X265Hbd.X265Primitives.Satd4x4(a + o, 48, b, 48) != X265Hbd.X265Primitives.Satd4x4Scalar(a + o, 48, b, 48)) bad++;
             int n = 4 << (iter & 3);
             if (X265Hbd.X265Primitives.SsePP(a + o, 48, b, 48, n, n) != X265Hbd.X265Primitives.SsePPScalar(a + o, 48, b, 48, n, n)) bad++;
+            if (X265Hbd.X265Primitives.Sad(a + o, 48, b, 48, n, n) != X265Hbd.X265Primitives.SadScalar(a + o, 48, b, 48, n, n)) bad++;
         }
 
         return bad;

@@ -162,6 +162,29 @@ internal static unsafe partial class X265Primitives
         return Vector128.Sum(sum) >> 1;
     }
 
+    /// <summary>sad: the sum of absolute differences of a lx x ly block.</summary>
+    public static int Sad(pixel* pix1, long stride1, pixel* pix2, long stride2, int lx, int ly)
+    {
+        if (!Vector128.IsHardwareAccelerated || lx < 4) return SadScalar(pix1, stride1, pix2, stride2, lx, ly);
+        var acc = Vector128<int>.Zero;
+        for (int y = 0; y < ly; y++, pix1 += stride1, pix2 += stride2)
+        {
+            int x = 0;
+            for (; x + 8 <= lx; x += 8)
+            {
+                LoadDiff8(pix1 + x, pix2 + x, out var lo, out var hi);
+                acc += Vector128.Abs(lo) + Vector128.Abs(hi);
+            }
+
+            if (x < lx)
+            {
+                acc += Vector128.Abs(LoadDiff4(pix1 + x, pix2 + x));
+            }
+        }
+
+        return Vector128.Sum(acc);
+    }
+
     /// <summary>sse_pp: the sum of squared differences of a lx x ly block.</summary>
     public static sse_t SsePP(pixel* pix1, long stride1, pixel* pix2, long stride2, int lx, int ly)
     {
