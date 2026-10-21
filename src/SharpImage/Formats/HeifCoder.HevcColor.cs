@@ -25,13 +25,11 @@ public static partial class HeifCoder
     /// Op_YCbCr_to_RGB. Chroma is nearest-neighbour throughout. Samples deeper than 8 bits are scaled to 16 as heif-dec
     /// writes its PNG (<c>v &lt;&lt; s | v &gt;&gt; (16 - s)</c>, s = 16 - depth).
     /// </summary>
-    private static void ConvertHevcPicture(Hevc.DecodedVideoFrame yuv, Hevc.HevcSequenceParameterSet sps,
+    private static void ConvertHevcPicture(Hevc.DecodedVideoFrame yuv, Hevc.HevcChromaFormat chroma, int bpp,
         (int Cp, int Tc, int Mc, bool Full) nclx, ImageFrame frame)
     {
         int w = (int)frame.Columns, h = (int)frame.Rows, nch = frame.NumberOfChannels;
-        int bpp = sps.BitDepthLuma;
         bool hbd = bpp > 8;
-        var chroma = sps.ChromaFormatIdc;
         bool mono = chroma == Hevc.HevcChromaFormat.Monochrome;
         int shiftH = chroma is Hevc.HevcChromaFormat.Chroma420 or Hevc.HevcChromaFormat.Chroma422 ? 1 : 0;
         int shiftV = chroma == Hevc.HevcChromaFormat.Chroma420 ? 1 : 0;

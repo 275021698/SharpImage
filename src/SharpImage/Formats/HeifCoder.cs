@@ -657,6 +657,7 @@ public static partial class HeifCoder
 
         // ---- a Sample Transform ('sato', e.g. 16-bit depth extension) preferred over the primary: decoded as avifdec does
         ImageFrame frame;
+        YCbCrPlanes? primaryPlanes = null;
         if (TryDecodeSampleTransform(c, pid) is { } satoFrame)
         {
             frame = satoFrame;
@@ -679,8 +680,18 @@ public static partial class HeifCoder
                  && c.ItemData(premAlphaId) is { } agp)
             premAlpha = DecodeAlphaGridNative(c, c.ReferencesFrom(premAlphaId, "dimg"), ParseImageGrid(agp), outW, outH);
 
-        frame = DecodeImageTiles(c, tiles, rows, cols, outW, outH, codec, nclx, premAlpha);
+        // libheif transforms the decoded YCbCr image and converts subsampled chroma to 4:4:4 (bilinear) first when a
+        // step would split it (odd sizes): then the colour comes from the planes, transformed as libheif does
+        YCbCrPlanes?[]? planesOut = null;
+        if (codec != "av01" && HevcTransformsNeed444(c, pid, tiles[0], outW, outH)) planesOut = new YCbCrPlanes?[tiles.Count];
+        frame = DecodeImageTiles(c, tiles, rows, cols, outW, outH, codec, nclx, premAlpha, planesOut: planesOut);
         frame.Depth = ItemBitDepth(c, tiles[0]);
+        if (planesOut != null && planesOut.All(t => t != null))
+        {
+            var t0 = planesOut[0]!;
+            primaryPlanes = tiles.Count == 1 ? t0 : ComposePlanes(planesOut!, cols, (int)frame.Columns, (int)frame.Rows);
+            primaryPlanes.Nclx = t0.Nclx;
+        }
 
         // ---- alpha: an auxl alpha item (or alpha grid) of the primary; else per-tile alpha items -------------------
         int alphaId = -1;
@@ -754,7 +765,36 @@ public static partial class HeifCoder
         }
         int? irot = c.Property(pid, "irot") is { Len: >= 1 } ir ? data[ir.Off] & 3 : null;
         int? imir = c.Property(pid, "imir") is { Len: >= 1 } im ? data[im.Off] & 1 : null;
-        return ApplyHeifTransforms(frame, clap, irot, imir);
+        int preW = (int)frame.Columns, preH = (int)frame.Rows;
+        var shown = ApplyHeifTransforms(frame, clap, irot, imir);
+        if (primaryPlanes != null && primaryPlanes.W == preW && primaryPlanes.H == preH)
+        {
+            var crop = clap != null ? CropRectFromCleanAperture(clap, preW, preH) : null;
+            var tp = TransformPlanesLikeLibheif(primaryPlanes, crop, irot, imir);
+            if (tp.W == shown.Columns && tp.H == shown.Rows)
+            {
+                using var yuv = tp.ToDecoded();
+                var rgb = new ImageFrame();
+                rgb.Initialize(tp.W, tp.H, ColorspaceType.SRGB, false);
+                ConvertHevcPicture(yuv, tp.Chroma, tp.BitDepth, tp.Nclx, rgb);
+                int sc = shown.NumberOfChannels, rc = rgb.NumberOfChannels;
+                for (int y = 0; y < tp.H; y++)
+                {
+                    var src = rgb.GetPixelRow(y);
+                    var dst = shown.GetPixelRowForWrite(y);
+                    for (int x = 0; x < tp.W; x++)
+                    {
+                        dst[x * sc] = src[x * rc];
+                        dst[(x * sc) + 1] = src[(x * rc) + 1];
+                        dst[(x * sc) + 2] = src[(x * rc) + 2];
+                    }
+                }
+
+                rgb.Dispose();
+            }
+        }
+
+        return shown;
     }
 
     // The coded tiles of an image item: the item itself, or a 'grid' item's dimg tiles (validated like libavif).
@@ -786,7 +826,7 @@ public static partial class HeifCoder
     // YUV image is first rescaled to that size with libyuv's box filter (libavif avifImageScale), e.g. a gain map
     // applied to a larger base image.
     private static ImageFrame DecodeImageTiles(HeifContainer c, List<int> tiles, int rows, int cols, int outW, int outH, string codec,
-        (int Cp, int Tc, int Mc, bool Full)? nclx, ushort[]? premAlpha, (int W, int H)? scaleTo = null)
+        (int Cp, int Tc, int Mc, bool Full)? nclx, ushort[]? premAlpha, (int W, int H)? scaleTo = null, YCbCrPlanes?[]? planesOut = null)
     {
         ImageFrame frame;
         if (codec == "av01" && tiles.Count > 1)
@@ -818,7 +858,7 @@ public static partial class HeifCoder
             try
             {
                 Parallel.For(0, tiles.Count, new ParallelOptions { MaxDegreeOfParallelism = Math.Min(Environment.ProcessorCount, 8) },
-                    i => tileFrames[i] = DecodeCodedItem(c, tiles[i], codec, nclx, premAlpha));
+                    i => tileFrames[i] = DecodeCodedItem(c, tiles[i], codec, nclx, premAlpha, planesOut, i));
             }
             catch (AggregateException e) when (e.InnerExceptions.Count > 0)
             {
@@ -828,7 +868,7 @@ public static partial class HeifCoder
         }
         else
         {
-            tileFrames[0] = DecodeCodedItem(c, tiles[0], codec, nclx, premAlpha);
+            tileFrames[0] = DecodeCodedItem(c, tiles[0], codec, nclx, premAlpha, planesOut, 0);
         }
         int tw = (int)tileFrames[0].Columns, th = (int)tileFrames[0].Rows;
         if (outW <= 0 || outH <= 0) (outW, outH) = (tw * cols, th * rows);
@@ -962,7 +1002,7 @@ public static partial class HeifCoder
     // Decodes one coded colour item (AV1 or HEVC) to an RGB frame of its coded size. CICP: the item's own colr nclx,
     // else the one inherited from the primary/grid, else (AV1) the sequence header.
     private static ImageFrame DecodeCodedItem(HeifContainer c, int id, string codec, (int Cp, int Tc, int Mc, bool Full)? inherited,
-        ushort[]? premAlpha = null)
+        ushort[]? premAlpha = null, YCbCrPlanes?[]? planesOut = null, int planesIndex = 0)
     {
         byte[] coded = c.ItemData(id) ?? throw new InvalidDataException($"Item {id} has no data.");
         var nclx = Nclx(c, id) ?? inherited;
@@ -978,7 +1018,7 @@ public static partial class HeifCoder
         else
         {
             byte[] hvcC = c.Property(id, "hvcC") is { } hp ? c.Data.AsSpan(hp.Off, hp.Len).ToArray() : FindConfigBox(c.Data, "hvcC");
-            DecodeHevcIntraFrame(coded, f, hvcC, nclx);
+            DecodeHevcIntraFrame(coded, f, hvcC, nclx, planesOut, planesIndex);
         }
         return f;
     }
@@ -3474,7 +3514,8 @@ public static partial class HeifCoder
         }
     }
 
-    private static void DecodeHevcIntraFrame(ReadOnlySpan<byte> codedData, ImageFrame frame, byte[] hvcC, (int Cp, int Tc, int Mc, bool Full)? colr)
+    private static void DecodeHevcIntraFrame(ReadOnlySpan<byte> codedData, ImageFrame frame, byte[] hvcC, (int Cp, int Tc, int Mc, bool Full)? colr,
+        YCbCrPlanes?[]? planesOut = null, int planesIndex = 0)
     {
         // Decode the HEVC keyframe with the vendored HEVC decoder. HEIC keeps the parameter
         // sets (VPS/SPS/PPS) in the hvcC configuration box and the coded slice NALs in the
@@ -3490,7 +3531,13 @@ public static partial class HeifCoder
             throw new InvalidDataException("Decoded image does not have the size signaled in the file.");
         var nclx = HevcNclx(colr, sps);
         frame.Metadata.Cicp ??= new SharpImage.Metadata.CicpInfo(nclx.Cp, nclx.Tc, nclx.Mc, nclx.Full);
-        ConvertHevcPicture(yuv, sps, nclx, frame);
+        ConvertHevcPicture(yuv, sps.ChromaFormatIdc, sps.BitDepthLuma, nclx, frame);
+        if (planesOut != null)
+        {
+            var planes = YCbCrPlanes.FromDecoded(yuv, sps.ChromaFormatIdc, sps.BitDepthLuma);
+            planes.Nclx = nclx;
+            planesOut[planesIndex] = planes;
+        }
     }
 
     #endregion

@@ -55,7 +55,7 @@ public sealed class HeicHeifEncParityTests
     }
 
     // Decoding as heif-dec does (libheif 1.23.6 + libde265; SHA-256 of its PNG's samples at 16 bits): libheif's
-    // colour conversions (8-bit fixed point, deeper float, 4:0:0 copied), its 16-bit scaling, alpha, irot, and a
+    // colour conversions (8-bit fixed point, deeper float, 4:0:0 copied), its 16-bit scaling, alpha, irot / imir, and a
     // picture the SPS holds back for reordering (libheif_example.heic), a 512x512 grid (tiles decoded in parallel).
     [Test]
     [Arguments("rgba_q50.heic", "0f0ff5966b6fe80ee68f8c8239d06ce0b7e88da1491dff301c912aca991cd065")]
@@ -68,6 +68,13 @@ public sealed class HeicHeifEncParityTests
     [Arguments("xmp_q50.heic", "6c62a72a3bcf1e6763f22b448fac0792626e8855d1e1230c81bd3c9af32835ff")]
     [Arguments("libheif_example.heic", "7f8009bb1558f4a35e6134318f7a17aa9a1c214706790ed0b973065925923d7a")]
     [Arguments("grid512_q50.heic", "55e7a097ff20ac9c5361c91d627ee5d7deb579c6835983c1583cffba00b295da")]
+    // odd sizes with irot / imir: libheif converts 4:2:0 / 4:2:2 to 4:4:4 (bilinear chroma) before the rotation or
+    // mirror; grids (heif-enc --cut-tiles 64) composed first; 10-bit with alpha
+    [Arguments("o5_q50.heic", "98e50aacc23f0b410acc97dff6c2ab9f509f1b8303133fa3cd551af292525064")]
+    [Arguments("o8_q50.heic", "d4f1b4ec4b43e6f3fb6268ea2dd9d6d6b839ecceb8e9a170e749294b8194e6f5")]
+    [Arguments("grid_o5_420.heic", "b6a585803e654ee966f91606a027e7633f3a018b62d5e469281d5213d4408fcf")]
+    [Arguments("grid_o8_422.heic", "919714884451c10b4674ccef479ba12c40da335a54cecef7f8263b2c7b632afb")]
+    [Arguments("deepa_o6.heic", "59098e85e0d30070f7436b2c97e245deff3adc189f8d591acf68843433234aaa")]
     public async Task Decode_MatchesHeifDec(string file, string sha256)
     {
         using var image = FormatRegistry.Read(Asset(file));
