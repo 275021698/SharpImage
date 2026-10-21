@@ -1441,8 +1441,28 @@ internal sealed partial class LjFrameDecoder
 
         if (linear)
         {
-            // No CMS: output_encoding_info.color_encoding_is_original or !cms_set -> from-linear stage.
-            pipeline.AddStage(FromLinearStage(oe));
+            int channelsSrc = oe.OrigColorEncoding.Cmyk ? 4 : LjCe.IsGray(oe.OrigColorEncoding) ? 1 : 3;
+            int channelsDst = LjCe.IsGray(oe.ColorEncoding) ? 1 : 3;
+            if (oe.ColorEncodingIsOriginal || !oe.CmsSet || channelsDst != channelsSrc)
+            {
+                pipeline.AddStage(FromLinearStage(oe));
+            }
+            else
+            {
+                LjCmsStage? cms = LjCmsStage.Create(oe, true);
+                if (cms != null)
+                {
+                    pipeline.AddStage(cms);
+                }
+            }
+        }
+        else
+        {
+            LjCmsStage? cms = LjCmsStage.Create(oe, false);
+            if (cms != null)
+            {
+                pipeline.AddStage(cms);
+            }
         }
 
         outputStage = new LjWriteStage(false);

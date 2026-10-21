@@ -304,6 +304,24 @@ internal sealed class LjColorEncoding : ILjBundle
     /// <summary>The ICC profile (when <see cref="WantIcc"/>); not serialized here.</summary>
     public byte[]? Icc;
 
+    /// <summary>Not serialized: the ICC profile is a CMYK one (set when a CMS filled the fields from the ICC).</summary>
+    public bool Cmyk;
+
+    /// <summary>Copy of all fields (the ICC bytes are shared).</summary>
+    public LjColorEncoding Clone()
+    {
+        var c = (LjColorEncoding)MemberwiseClone();
+        c.White = new LjCustomxy { X = White.X, Y = White.Y };
+        c.Red = new LjCustomxy { X = Red.X, Y = Red.Y };
+        c.Green = new LjCustomxy { X = Green.X, Y = Green.Y };
+        c.Blue = new LjCustomxy { X = Blue.X, Y = Blue.Y };
+        c.Tf = new LjCustomTransferFunction
+        {
+            NonserializedColorSpace = Tf.NonserializedColorSpace, HaveGamma = Tf.HaveGamma, Gamma = Tf.Gamma, TransferFunction = Tf.TransferFunction,
+        };
+        return c;
+    }
+
     public bool HasPrimaries => ColorSpace != CsGray && ColorSpace != CsXyb;
 
     private bool ImplicitWhitePoint()

@@ -83,11 +83,11 @@ public static class JxlCoder
         byte[] cs = FindCodestream(data);
         try
         {
-            return Jxl.Lj.LjDecoder.Decode(cs, maxFrames, preferSrgb: true);
+            return Jxl.Lj.LjDecoder.Decode(cs, maxFrames, preferSrgb: true, cmykToSrgb: true);
         }
         catch (InvalidDataException)
         {
-            return Jxl.Lj.LjDecoder.Decode(cs, maxFrames, preferSrgb: false);
+            return Jxl.Lj.LjDecoder.Decode(cs, maxFrames, preferSrgb: false, cmykToSrgb: true);
         }
     }
 

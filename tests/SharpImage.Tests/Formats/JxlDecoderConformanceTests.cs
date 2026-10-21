@@ -76,7 +76,7 @@ public class JxlDecoderConformanceTests
         }
     }
 
-    private static bool OnReferencePlatform()
+    internal static bool OnReferencePlatform()
     {
         // The MSVC runtime's cbrtf (which djxl links) is not correctly rounded; .NET's MathF.Cbrt reaches the host's.
         if (BitConverter.SingleToUInt32Bits(MathF.Cbrt(-2.5f)) != 0xBFADB904u || BitConverter.SingleToUInt32Bits(MathF.Cbrt(7.75f)) != 0x3FFD4E18u)

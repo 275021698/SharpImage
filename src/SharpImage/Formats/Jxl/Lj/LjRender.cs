@@ -913,6 +913,84 @@ internal sealed class LjFromLinearStage : LjStage
     }
 }
 
+/// <summary>CmsStage (stage_cms.cc): converts the colour (or CMYK) channels to the output encoding through the CMS.</summary>
+internal sealed class LjCmsStage : LjStage
+{
+    private readonly LjColorEncoding cSrc;
+    private readonly LjOutputEncoding oe;
+    private LjCms.Transform? transform;
+
+    private LjCmsStage(LjOutputEncoding oe, bool linear)
+    {
+        this.oe = oe;
+        cSrc = linear ? oe.LinearColorEncoding : oe.OrigColorEncoding;
+    }
+
+    /// <summary>GetCmsStage: null when the stage is not needed.</summary>
+    public static LjCmsStage? Create(LjOutputEncoding oe, bool linear)
+    {
+        var s = new LjCmsStage(oe, linear);
+        int channelsSrc = s.cSrc.Cmyk ? 4 : LjCe.IsGray(s.cSrc) ? 1 : 3;
+        int channelsDst = LjCe.IsGray(oe.ColorEncoding) ? 1 : 3;
+        bool notMixingColorAndGrey = channelsSrc == channelsDst || (channelsSrc == 4 && channelsDst == 3);
+        return oe.CmsSet && !LjCms.SameColorEncoding(s.cSrc, oe.ColorEncoding) && notMixingColorAndGrey ? s : null;
+    }
+
+    public override LjChannelMode GetChannelMode(int c) => c < (cSrc.Cmyk ? 4 : 3) ? LjChannelMode.InPlace : LjChannelMode.Ignored;
+
+    public override void SetInputSizes(int[] xs, int[] ys)
+    {
+        // PrepareForThreads: ColorSpaceTransform::Init.
+        transform = LjCms.Transform.Create(cSrc, oe.ColorEncoding, oe.DesiredIntensityTarget) ?? throw LjDec.Fail("CMS initialization failed");
+    }
+
+    public override void ProcessRow(LjStageRows input, LjStageRows output, int xsize, int xpos, int ypos)
+    {
+        bool graySrc = LjCe.IsGray(cSrc), grayDst = LjCe.IsGray(oe.ColorEncoding);
+        var bufSrc = new float[xsize * 4];
+        var bufDst = new float[xsize * 3];
+        (float[] a0, int o0) = In(input, 0, 0);
+        if (cSrc.Cmyk)
+        {
+            (float[] a1, int o1) = In(input, 1, 0);
+            (float[] a2, int o2) = In(input, 2, 0);
+            (float[] a3, int o3) = In(input, 3, 0);
+            for (int x = 0; x < xsize; x++)
+            {
+                bufSrc[4 * x] = a0[o0 + x];
+                bufSrc[(4 * x) + 1] = a1[o1 + x];
+                bufSrc[(4 * x) + 2] = a2[o2 + x];
+                bufSrc[(4 * x) + 3] = a3[o3 + x];
+            }
+        }
+        else if (graySrc)
+        {
+            Array.Copy(a0, o0, bufSrc, 0, xsize);
+        }
+        else
+        {
+            (float[] a1, int o1) = In(input, 1, 0);
+            (float[] a2, int o2) = In(input, 2, 0);
+            for (int x = 0; x < xsize; x++)
+            {
+                bufSrc[3 * x] = a0[o0 + x];
+                bufSrc[(3 * x) + 1] = a1[o1 + x];
+                bufSrc[(3 * x) + 2] = a2[o2 + x];
+            }
+        }
+
+        transform!.Run(bufSrc, bufDst, xsize);
+        for (int c = 0; c < 3; c++)
+        {
+            (float[] a, int o) = In(input, c, 0);
+            for (int x = 0; x < xsize; x++)
+            {
+                a[o + x] = grayDst ? bufDst[x] : bufDst[(3 * x) + c];
+            }
+        }
+    }
+}
+
 /// <summary>WriteToImageBundleStage / WriteToImage3FStage / the main output: copies the rows into float planes.</summary>
 internal sealed class LjWriteStage : LjStage
 {

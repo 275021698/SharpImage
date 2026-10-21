@@ -46,8 +46,12 @@ internal sealed class LjDecodedImage
 
 internal static class LjDecoder
 {
-    /// <summary>Decodes a bare JPEG XL codestream. <paramref name="maxFrames"/> limits the displayed frames returned.</summary>
-    public static LjDecodedImage Decode(byte[] cs, int maxFrames = int.MaxValue, LjColorEncoding? desired = null, bool preferSrgb = false)
+    /// <summary>Decodes a bare JPEG XL codestream. <paramref name="maxFrames"/> limits the displayed frames returned.
+    /// <paramref name="cmykToSrgb"/> renders CMYK images (a black extra channel) to sRGB through the CMS the way djxl does
+    /// for output formats without CMYK; otherwise they come out as raw C, M, Y planes plus the black channel.
+    /// <paramref name="cmsOutput"/> converts the image to that encoding through the CMS (djxl --color_space).</summary>
+    public static LjDecodedImage Decode(byte[] cs, int maxFrames = int.MaxValue, LjColorEncoding? desired = null, bool preferSrgb = false,
+        bool cmykToSrgb = false, LjColorEncoding? cmsOutput = null)
     {
         if (cs.Length < 2 || cs[0] != 0xFF || cs[1] != 0x0A)
         {
@@ -73,7 +77,15 @@ internal static class LjDecoder
         }
 
         st.Output.SetFromMetadata(st.Meta, st.Transform);
-        if (desired != null)
+        if (cmsOutput != null)
+        {
+            SetOutputColorProfileWithCms(st, cmsOutput);
+        }
+        else if (desired == null && cmykToSrgb && st.Meta.ExtraChannelInfo.Exists(e => e.Type == LjExtraChannelInfo.TypeBlack))
+        {
+            SetOutputColorProfileWithCms(st, LjCe.Srgb(false));
+        }
+        else if (desired != null)
         {
             st.Output.SetColorEncoding(desired);
         }
@@ -119,6 +131,34 @@ internal static class LjDecoder
         }
 
         return img;
+    }
+
+    /// <summary>JxlDecoderSetCms + JxlDecoderSetOutputColorProfile(color_encoding): the CMS fills the fields of an ICC-only
+    /// original encoding, then the output switches to <paramref name="cOut"/>.</summary>
+    private static void SetOutputColorProfileWithCms(LjDecoderState st, LjColorEncoding cOut)
+    {
+        LjOutputEncoding oe = st.Output;
+        oe.CmsSet = true;
+        LjColorEncoding orig = st.Meta.ColorEncoding;
+        if (orig.WantIcc)
+        {
+            // orig_encoding.SetICC(icc, cms)
+            oe.OrigColorEncoding = LjCms.FromIcc(orig.Icc ?? []) ?? throw LjDec.Fail("failed to parse the ICC profile");
+        }
+
+        // OutputEncodingInfo::MaybeSetColorEncoding
+        if (cOut.ColorSpace == LjColorEncoding.CsXyb && ((oe.ColorEncoding.ColorSpace == LjColorEncoding.CsRgb &&
+                                                          oe.ColorEncoding.Primaries != LjColorEncoding.PrSrgb) || LjCe.TfIsPq(oe.ColorEncoding)))
+        {
+            throw LjDec.Fail("cannot set the output colour encoding");
+        }
+
+        if (!oe.XybEncoded && !LjCe.CanOutputTo(cOut))
+        {
+            throw LjDec.Fail("cannot set the output colour encoding");
+        }
+
+        oe.SetColorEncoding(cOut);
     }
 
     /// <summary>The SharpImage colour space an enumerated encoding corresponds to, or null when there is none.</summary>

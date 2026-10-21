@@ -278,6 +278,21 @@ internal sealed class LjOutputEncoding
     public float[] Luminances = [0.2126f, 0.7152f, 0.0722f];
     public float DesiredIntensityTarget;
 
+    /// <summary>A colour management system is available (JxlDecoderSetCms).</summary>
+    public bool CmsSet;
+
+    /// <summary>ColorEncoding with a linear transfer function (linear_color_encoding).</summary>
+    public LjColorEncoding LinearColorEncoding
+    {
+        get
+        {
+            LjColorEncoding c = ColorEncoding.Clone();
+            c.Tf.HaveGamma = false;
+            c.Tf.TransferFunction = LjCustomTransferFunction.TfLinear;
+            return c;
+        }
+    }
+
     public void SetFromMetadata(LjImageMetadata m, LjCustomTransformData transform)
     {
         OrigColorEncoding = m.ColorEncoding;

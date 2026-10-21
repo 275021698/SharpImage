@@ -32,11 +32,13 @@ internal static partial class LjDec
             ? BitConverter.UInt32BitsToSingle(0xBE1FB276u)   // libjxl's cbrtf(-0.0037930732552754493f), the default opsin bias
             : MathF.Cbrt(x);
 
-    public static float PowF(float a, float b) => (float)Math.Pow(a, b);
+    // libjxl's float std::pow / std::log / std::log2 are the C runtime's powf / logf / log2f; on Windows MathF calls the
+    // same UCRT functions djxl links.
+    public static float PowF(float a, float b) => MathF.Pow(a, b);
 
-    public static float LogF(float x) => (float)Math.Log(x);
+    public static float LogF(float x) => MathF.Log(x);
 
-    public static float Log2F(float x) => (float)Math.Log2(x);
+    public static float Log2F(float x) => MathF.Log2(x);
 
     public static int FloorLog2Nonzero(long x) => 63 - System.Numerics.BitOperations.LeadingZeroCount((ulong)x);
 
