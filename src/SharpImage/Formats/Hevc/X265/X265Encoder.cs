@@ -586,8 +586,16 @@ internal static unsafe class X265Encoder
         var initSliceContext = new X265Entropy(arena);
         initSliceContext.ResetEntropy(slice);
 
-        var analysis = new X265Analysis(arena, p) { QpAqOffset = qpAqOffset };
-        analysis.SetFrame(frame);
+        // one analysis (search state) per worker: WPP rows run in parallel, each CTU once the row above is two CTUs
+        // ahead (x265's wavefront; the output does not depend on the thread count)
+        bool parallelRows = p.bEnableWavefront && numRows > 1;
+        int workers = parallelRows ? Math.Max(1, Math.Min((int)numRows, Environment.ProcessorCount)) : 1;
+        var analyses = new X265Analysis[workers];
+        for (int i = 0; i < workers; i++)
+        {
+            analyses[i] = new X265Analysis(arena, p) { QpAqOffset = qpAqOffset };
+            analyses[i].SetFrame(frame);
+        }
 
         // per-row coders (WPP) and their buffered second-CTU contexts
         var rowCoders = new X265Entropy[numRows];
@@ -607,7 +615,46 @@ internal static unsafe class X265Encoder
         }
 
         // analysis (processRowEncoder) of every CTU row
-        for (uint row = 0; row < numRows; row++)
+        var completed = new int[numRows];
+        if (workers == 1)
+        {
+            for (uint row = 0; row < numRows; row++)
+            {
+                AnalyseRow(row, analyses[0]);
+            }
+        }
+        else
+        {
+            int nextRow = -1;
+            var threads = new System.Threading.Thread[workers];
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo? failure = null;
+            for (int i = 0; i < workers; i++)
+            {
+                X265Analysis worker = analyses[i];
+                threads[i] = new System.Threading.Thread(() =>
+                {
+                    try
+                    {
+                        for (int row; (row = System.Threading.Interlocked.Increment(ref nextRow)) < numRows && failure == null;)
+                        {
+                            AnalyseRow((uint)row, worker);
+                        }
+                    }
+                    catch (Exception e)
+                    {
+                        failure ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(e);
+                        // release the rows waiting on this one
+                        for (int r = 0; r < numRows; r++) System.Threading.Volatile.Write(ref completed[r], (int)numCols);
+                    }
+                }, 16 * 1024 * 1024) { IsBackground = true };
+                threads[i].Start();
+            }
+
+            foreach (var t in threads) t.Join();
+            failure?.Throw();
+        }
+
+        void AnalyseRow(uint row, X265Analysis analysis)
         {
             X265Entropy rowCoder = rowCoders[row];
             bool bFirstRowInSlice = row == 0;
@@ -619,6 +666,17 @@ internal static unsafe class X265Encoder
 
             for (uint col = 0; col < numCols; col++)
             {
+                if (row > 0)
+                {
+                    int need = (int)Math.Min(col + 2, numCols);
+                    ref int above = ref completed[row - 1];
+                    if (System.Threading.Volatile.Read(ref above) < need)
+                    {
+                        var spin = new System.Threading.SpinWait();
+                        while (System.Threading.Volatile.Read(ref above) < need) spin.SpinOnce();
+                    }
+                }
+
                 uint cuAddr = (row * numCols) + col;
                 X265CuData ctu = frame.GetPicCTU(cuAddr);
                 uint bLastCuInSlice = bLastRowInSlice && col == numCols - 1 ? 1u : 0u;
@@ -638,6 +696,8 @@ internal static unsafe class X265Encoder
                 {
                     bufferedEntropy[row].LoadContexts(rowCoder);
                 }
+
+                System.Threading.Volatile.Write(ref completed[row], (int)col + 1);
             }
 
             if (!slice.m_bUseSao && (p.bEnableWavefront || bLastRowInSlice))
