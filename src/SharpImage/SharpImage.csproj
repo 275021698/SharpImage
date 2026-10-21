@@ -33,4 +33,35 @@
     <None Include="..\..\icon.png" Pack="true" PackagePath="\" Condition="Exists('..\..\icon.png')" />
   </ItemGroup>
 
+  <!-- The x265 port is compiled twice, as x265 itself is: the sources as they are (8-bit, namespace
+       Formats.Hevc.X265) and a copy with HIGH_BIT_DEPTH defined (10-bit, namespace Formats.Hevc.X265.Hbd). -->
+  <UsingTask TaskName="X265HighBitDepthCopy" TaskFactory="RoslynCodeTaskFactory" AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
+    <ParameterGroup>
+      <Sources ParameterType="Microsoft.Build.Framework.ITaskItem[]" Required="true" />
+      <OutputDir ParameterType="System.String" Required="true" />
+    </ParameterGroup>
+    <Task>
+      <Code Type="Fragment" Language="cs"><![CDATA[
+        System.IO.Directory.CreateDirectory(OutputDir);
+        foreach (var item in Sources)
+        {
+            string src = item.GetMetadata("FullPath");
+            string dst = System.IO.Path.Combine(OutputDir, item.GetMetadata("Filename") + ".Hbd.cs");
+            string text = "#define HIGH_BIT_DEPTH\n#line 1 \"" + src + "\"\n" + System.IO.File.ReadAllText(src);
+            if (!System.IO.File.Exists(dst) || System.IO.File.ReadAllText(dst) != text) System.IO.File.WriteAllText(dst, text);
+        }
+      ]]></Code>
+    </Task>
+  </UsingTask>
+
+  <Target Name="X265HighBitDepth" BeforeTargets="CoreCompile">
+    <ItemGroup>
+      <_X265Source Include="Formats\Hevc\X265\*.cs" />
+    </ItemGroup>
+    <X265HighBitDepthCopy Sources="@(_X265Source)" OutputDir="$(IntermediateOutputPath)X265Hbd" />
+    <ItemGroup>
+      <Compile Include="$(IntermediateOutputPath)X265Hbd\*.Hbd.cs" />
+    </ItemGroup>
+  </Target>
+
 </Project>

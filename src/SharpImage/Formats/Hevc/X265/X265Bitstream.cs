@@ -2,7 +2,11 @@
 // serializeSubstreams): RBSP bit writing, emulation prevention and Annex B start codes.
 using System;
 
+#if HIGH_BIT_DEPTH
+namespace SharpImage.Formats.Hevc.X265.Hbd;
+#else
 namespace SharpImage.Formats.Hevc.X265;
+#endif
 
 /// <summary>class Bitstream: an RBSP byte FIFO with a partial byte.</summary>
 internal sealed class X265Bitstream

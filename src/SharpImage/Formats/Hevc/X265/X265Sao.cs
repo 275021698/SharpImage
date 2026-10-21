@@ -4,9 +4,19 @@
 // FrameFilter::ParallelFilter. Only the generic (non-SIMD-shaped) application paths are needed: x265's 16-wide
 // fast paths give the same samples.
 using System;
-using static SharpImage.Formats.Hevc.X265.X265Const;
 
+#if HIGH_BIT_DEPTH
+namespace SharpImage.Formats.Hevc.X265.Hbd;
+#else
 namespace SharpImage.Formats.Hevc.X265;
+#endif
+
+using static X265Const;
+#if HIGH_BIT_DEPTH
+using pixel = ushort;
+#else
+using pixel = byte;
+#endif
 
 [System.Runtime.CompilerServices.SkipLocalsInit]
 internal sealed unsafe class X265Sao
@@ -15,7 +25,7 @@ internal sealed unsafe class X265Sao
     public const int SAO_MERGE_NONE = 0, SAO_MERGE_LEFT = 1, SAO_MERGE_UP = 2;
     private const int MAX_NUM_SAO_CLASS = 32;
     private const int SAO_BIT_INC = 0;
-    private const int OFFSET_THRESH = 1 << 3;   // 1 << min(X265_DEPTH - 5, 5)
+    private const int OFFSET_THRESH = 1 << (X265_DEPTH - 5 < 5 ? X265_DEPTH - 5 : 5);
     private const int NUM_EDGETYPE = 5;
     private const int SAO_BO_BITS = 5;
     private static readonly uint[] s_eoTable = { 1, 2, 0, 3, 4 };
@@ -27,9 +37,9 @@ internal sealed unsafe class X265Sao
     private readonly int* m_offsetOrg;
     private readonly sbyte* m_offsetBo;   // [3][32]
     private readonly sbyte* m_offsetEo;   // [3][5]
-    private readonly byte*[] m_tmpU = new byte*[3];
-    private readonly byte*[] m_tmpL1 = new byte*[3];
-    private readonly byte*[] m_tmpL2 = new byte*[3];
+    private readonly pixel*[] m_tmpU = new pixel*[3];
+    private readonly pixel*[] m_tmpL1 = new pixel*[3];
+    private readonly pixel*[] m_tmpL2 = new pixel*[3];
     private readonly int m_numCuInWidth;
     private readonly int m_hChromaShift, m_vChromaShift;
     private readonly X265Param m_param;
@@ -50,9 +60,9 @@ internal sealed unsafe class X265Sao
         m_offsetEo = arena.Alloc<sbyte>(3 * NUM_EDGETYPE);
         for (int i = 0; i < (param.internalCsp != X265_CSP_I400 ? 3 : 1); i++)
         {
-            m_tmpL1[i] = arena.Alloc<byte>(param.maxCUSize + 1);
-            m_tmpL2[i] = arena.Alloc<byte>(param.maxCUSize + 1);
-            m_tmpU[i] = arena.Alloc<byte>((m_numCuInWidth * param.maxCUSize) + 2 + 32) + 1;
+            m_tmpL1[i] = arena.Alloc<pixel>(param.maxCUSize + 1);
+            m_tmpL2[i] = arena.Alloc<pixel>(param.maxCUSize + 1);
+            m_tmpU[i] = arena.Alloc<pixel>((m_numCuInWidth * param.maxCUSize) + 2 + 32) + 1;
         }
 
         m_entropyCoder = new X265Entropy(arena);
@@ -86,7 +96,7 @@ internal sealed unsafe class X265Sao
     private void ApplyPixelOffsets(int addr, int typeIdx, int plane)
     {
         X265PicYuv reconPic = m_frame.m_reconPic;
-        byte* rec = reconPic.GetPlaneAddr((uint)plane, (uint)addr);
+        pixel* rec = reconPic.GetPlaneAddr((uint)plane, (uint)addr);
         long stride = plane != 0 ? reconPic.m_strideC : reconPic.m_stride;
         uint picWidth = (uint)m_param.sourceWidth;
         uint picHeight = (uint)m_param.sourceHeight;
@@ -123,8 +133,8 @@ internal sealed unsafe class X265Sao
         sbyte* upBufftBase = stackalloc sbyte[MAX_CU_SIZE + 2];
         sbyte* upBuff1 = upBuff1Base + 1;
         sbyte* upBufft = upBufftBase + 1;
-        byte* tmpL = m_tmpL1[plane];
-        byte* tmpU = m_tmpU[plane] + lpelx;
+        pixel* tmpL = m_tmpL1[plane];
+        pixel* tmpU = m_tmpU[plane] + lpelx;
         sbyte* offsetEo = m_offsetEo + (plane * NUM_EDGETYPE);
 
         switch (typeIdx)
@@ -299,7 +309,7 @@ internal sealed unsafe class X265Sao
         int ctuWidth = m_param.maxCUSize;
         int ctuHeight = m_param.maxCUSize;
         int addr = (idxY * m_numCuInWidth) + idxX;
-        byte* rec = reconPic.GetLumaAddr((uint)addr);
+        pixel* rec = reconPic.GetLumaAddr((uint)addr);
         if (idxX == 0)
         {
             for (int i = 0; i < ctuHeight + 1; i++)
@@ -331,7 +341,7 @@ internal sealed unsafe class X265Sao
             ApplyPixelOffsets(addr, typeIdx, 0);
         }
 
-        byte* t0 = m_tmpL1[0]; m_tmpL1[0] = m_tmpL2[0]; m_tmpL2[0] = t0;
+        pixel* t0 = m_tmpL1[0]; m_tmpL1[0] = m_tmpL2[0]; m_tmpL2[0] = t0;
     }
 
     public void GenerateChromaOffsets(SaoCtuParam[][] ctuParam, int idxY, int idxX)
@@ -341,8 +351,8 @@ internal sealed unsafe class X265Sao
         int ctuWidth = m_param.maxCUSize >> m_hChromaShift;
         int ctuHeight = m_param.maxCUSize >> m_vChromaShift;
         int addr = (idxY * m_numCuInWidth) + idxX;
-        byte* recCb = reconPic.GetChromaAddr(1, (uint)addr);
-        byte* recCr = reconPic.GetChromaAddr(2, (uint)addr);
+        pixel* recCb = reconPic.GetChromaAddr(1, (uint)addr);
+        pixel* recCr = reconPic.GetChromaAddr(2, (uint)addr);
         if (idxX == 0)
         {
             for (int i = 0; i < ctuHeight + 1; i++)
@@ -391,23 +401,23 @@ internal sealed unsafe class X265Sao
             ApplyPixelOffsets(addr, typeIdxCb, 2);   // x265 passes the Cb type (chroma types are always equal)
         }
 
-        byte* t1 = m_tmpL1[1]; m_tmpL1[1] = m_tmpL2[1]; m_tmpL2[1] = t1;
-        byte* t2 = m_tmpL1[2]; m_tmpL1[2] = m_tmpL2[2]; m_tmpL2[2] = t2;
+        pixel* t1 = m_tmpL1[1]; m_tmpL1[1] = m_tmpL2[1]; m_tmpL2[1] = t1;
+        pixel* t2 = m_tmpL1[2]; m_tmpL1[2] = m_tmpL2[2]; m_tmpL2[2] = t2;
     }
 
     /// <summary>FrameFilter::ParallelFilter::copySaoAboveRef: the deblocked line above a CTU before SAO changes it.</summary>
     public void CopySaoAboveRef(X265CuData ctu, X265PicYuv reconPic, uint cuAddr, int col)
     {
         int ctuWidth = m_param.maxCUSize;
-        byte* recY = reconPic.GetPlaneAddr(0, cuAddr) - (ctu.m_bFirstRowInSlice != 0 ? 0 : reconPic.m_stride);
-        Buffer.MemoryCopy(recY, m_tmpU[0] + (col * ctuWidth), ctuWidth, ctuWidth);
+        pixel* recY = reconPic.GetPlaneAddr(0, cuAddr) - (ctu.m_bFirstRowInSlice != 0 ? 0 : reconPic.m_stride);
+        Buffer.MemoryCopy(recY, m_tmpU[0] + (col * ctuWidth), ctuWidth * sizeof(pixel), ctuWidth * sizeof(pixel));
         if (m_param.internalCsp != X265_CSP_I400)
         {
             ctuWidth >>= m_hChromaShift;
-            byte* recU = reconPic.GetPlaneAddr(1, cuAddr) - (ctu.m_bFirstRowInSlice != 0 ? 0 : reconPic.m_strideC);
-            byte* recV = reconPic.GetPlaneAddr(2, cuAddr) - (ctu.m_bFirstRowInSlice != 0 ? 0 : reconPic.m_strideC);
-            Buffer.MemoryCopy(recU, m_tmpU[1] + (col * ctuWidth), ctuWidth, ctuWidth);
-            Buffer.MemoryCopy(recV, m_tmpU[2] + (col * ctuWidth), ctuWidth, ctuWidth);
+            pixel* recU = reconPic.GetPlaneAddr(1, cuAddr) - (ctu.m_bFirstRowInSlice != 0 ? 0 : reconPic.m_strideC);
+            pixel* recV = reconPic.GetPlaneAddr(2, cuAddr) - (ctu.m_bFirstRowInSlice != 0 ? 0 : reconPic.m_strideC);
+            Buffer.MemoryCopy(recU, m_tmpU[1] + (col * ctuWidth), ctuWidth * sizeof(pixel), ctuWidth * sizeof(pixel));
+            Buffer.MemoryCopy(recV, m_tmpU[2] + (col * ctuWidth), ctuWidth * sizeof(pixel), ctuWidth * sizeof(pixel));
         }
     }
 
@@ -417,8 +427,8 @@ internal sealed unsafe class X265Sao
     {
         X265PicYuv reconPic = m_frame.m_reconPic;
         X265CuData cu = m_frame.GetPicCTU((uint)addr);
-        byte* fenc0 = m_frame.m_fencPic.GetPlaneAddr((uint)plane, (uint)addr);
-        byte* rec0 = reconPic.GetPlaneAddr((uint)plane, (uint)addr);
+        pixel* fenc0 = m_frame.m_fencPic.GetPlaneAddr((uint)plane, (uint)addr);
+        pixel* rec0 = reconPic.GetPlaneAddr((uint)plane, (uint)addr);
         long stride = plane != 0 ? reconPic.m_strideC : reconPic.m_stride;
         uint picWidth = (uint)m_param.sourceWidth;
         uint picHeight = (uint)m_param.sourceHeight;
@@ -485,7 +495,7 @@ internal sealed unsafe class X265Sao
 
         // SAO_EO_1: dir |
         {
-            byte* rec = rec0;
+            pixel* rec = rec0;
             int startY = bAboveUnavail ? 1 : 0;
             int endX = rpelx == picWidth ? ctuWidth : ctuWidth - skipR + planeOffset;
             int endY = bpely == picHeight ? ctuHeight - 1 : ctuHeight - skipB + planeOffset;
@@ -505,7 +515,7 @@ internal sealed unsafe class X265Sao
 
         // SAO_EO_2: dir 135
         {
-            byte* rec = rec0;
+            pixel* rec = rec0;
             int startX = lpelx == 0 ? 1 : 0;
             int endX = rpelx == picWidth ? ctuWidth - 1 : ctuWidth - skipR + planeOffset;
             int startY = bAboveUnavail ? 1 : 0;
@@ -526,7 +536,7 @@ internal sealed unsafe class X265Sao
 
         // SAO_EO_3: dir 45
         {
-            byte* rec = rec0;
+            pixel* rec = rec0;
             int startX = lpelx == 0 ? 1 : 0;
             int endX = rpelx == picWidth ? ctuWidth - 1 : ctuWidth - skipR + planeOffset;
             int startY = bAboveUnavail ? 1 : 0;
@@ -554,7 +564,7 @@ internal sealed unsafe class X265Sao
         return r;
     }
 
-    private static void StatsBO(short* diff, byte* rec, long stride, int endX, int endY, int* stats, int* count)
+    private static void StatsBO(short* diff, pixel* rec, long stride, int endX, int endY, int* stats, int* count)
     {
         const int boShift = X265_DEPTH - SAO_BO_BITS;
         for (int y = 0; y < endY; y++)
@@ -571,7 +581,7 @@ internal sealed unsafe class X265Sao
         }
     }
 
-    private static void StatsE0(short* diff, byte* rec, long stride, int endX, int endY, int* stats, int* count)
+    private static void StatsE0(short* diff, pixel* rec, long stride, int endX, int endY, int* stats, int* count)
     {
         int* tmpStats = stackalloc int[NUM_EDGETYPE];
         int* tmpCount = stackalloc int[NUM_EDGETYPE];
@@ -599,7 +609,7 @@ internal sealed unsafe class X265Sao
         }
     }
 
-    private static void StatsE1(short* diff, byte* rec, long stride, sbyte* upBuff1, int endX, int endY, int* stats, int* count)
+    private static void StatsE1(short* diff, pixel* rec, long stride, sbyte* upBuff1, int endX, int endY, int* stats, int* count)
     {
         int* tmpStats = stackalloc int[NUM_EDGETYPE];
         int* tmpCount = stackalloc int[NUM_EDGETYPE];
@@ -626,7 +636,7 @@ internal sealed unsafe class X265Sao
         }
     }
 
-    private static void StatsE2(short* diff, byte* rec, long stride, sbyte* upBuff1, sbyte* upBufft, int endX, int endY, int* stats, int* count)
+    private static void StatsE2(short* diff, pixel* rec, long stride, sbyte* upBuff1, sbyte* upBufft, int endX, int endY, int* stats, int* count)
     {
         int* tmpStats = stackalloc int[NUM_EDGETYPE];
         int* tmpCount = stackalloc int[NUM_EDGETYPE];
@@ -657,7 +667,7 @@ internal sealed unsafe class X265Sao
         }
     }
 
-    private static void StatsE3(short* diff, byte* rec, long stride, sbyte* upBuff1, int endX, int endY, int* stats, int* count)
+    private static void StatsE3(short* diff, pixel* rec, long stride, sbyte* upBuff1, int endX, int endY, int* stats, int* count)
     {
         int* tmpStats = stackalloc int[NUM_EDGETYPE];
         int* tmpCount = stackalloc int[NUM_EDGETYPE];

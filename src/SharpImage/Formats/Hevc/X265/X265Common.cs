@@ -1,5 +1,6 @@
 // Port of x265 4.x common definitions (common/common.h, constants.h, cudata.h CUGeom) used by the HEVC still-image
-// encoder port: the 8-bit (X265_DEPTH 8) build, 4:2:0 / 4:0:0. Pointers mirror x265's so the search code reads like
+// encoder port: the 8-bit (X265_DEPTH 8) build and, compiled from the same sources with HIGH_BIT_DEPTH, the 10-bit
+// one; 4:2:0 / 4:0:0. Pointers mirror x265's so the search code reads like
 // the C++; every buffer lives in an X265Arena (native memory freed with the encoder).
 using System;
 using System.Collections.Generic;
@@ -7,13 +8,27 @@ using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
+#if HIGH_BIT_DEPTH
+namespace SharpImage.Formats.Hevc.X265.Hbd;
+#else
 namespace SharpImage.Formats.Hevc.X265;
+#endif
+
+#if HIGH_BIT_DEPTH
+using pixel = ushort;
+#else
+using pixel = byte;
+#endif
 
 internal static class X265Const
 {
+#if HIGH_BIT_DEPTH
+    public const int X265_DEPTH = 10;
+#else
     public const int X265_DEPTH = 8;
-    public const int QP_BD_OFFSET = 0;
-    public const int PIXEL_MAX = 255;
+#endif
+    public const int QP_BD_OFFSET = 6 * (X265_DEPTH - 8);
+    public const int PIXEL_MAX = (1 << X265_DEPTH) - 1;
     public const int QP_MIN = 0;
     public const int QP_MAX_SPEC = 51;
     public const int QP_MAX_MAX = 69;
@@ -151,7 +166,7 @@ internal static class X265Const
     public static double Clip3(double lo, double hi, double v) => v < lo ? lo : v > hi ? hi : v;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static byte ClipPixel(int v) => (byte)(v < 0 ? 0 : v > 255 ? 255 : v);
+    public static pixel ClipPixel(int v) => (pixel)(v < 0 ? 0 : v > PIXEL_MAX ? PIXEL_MAX : v);
 
     /// <summary>BSR: index of the highest set bit (x != 0).</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

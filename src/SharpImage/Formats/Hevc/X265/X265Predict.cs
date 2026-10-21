@@ -1,9 +1,21 @@
 // Port of x265 encoder/rdcost.h (RDCost) and the intra half of common/predict.{h,cpp} (Predict): reference sample
 // availability and filling, [1 2 1] / strong smoothing, and angular / planar / DC prediction of luma and chroma.
 using System;
-using static SharpImage.Formats.Hevc.X265.X265Const;
 
+#if HIGH_BIT_DEPTH
+namespace SharpImage.Formats.Hevc.X265.Hbd;
+#else
 namespace SharpImage.Formats.Hevc.X265;
+#endif
+
+using static X265Const;
+#if HIGH_BIT_DEPTH
+using pixel = ushort;
+using sse_t = ulong;
+#else
+using pixel = byte;
+using sse_t = uint;
+#endif
 
 /// <summary>class RDCost: all weights and factors as FIX8.</summary>
 internal sealed class X265RdCost
@@ -59,17 +71,17 @@ internal sealed class X265RdCost
         m_lambda = (ulong)Math.Floor(256.0 * lambda);
     }
 
-    public ulong CalcRdCost(uint distortion, uint bits) => distortion + (((bits * m_lambda2) + 128) >> 8);
+    public ulong CalcRdCost(sse_t distortion, uint bits) => distortion + (((bits * m_lambda2) + 128) >> 8);
 
-    public static unsafe int PsyCost(int size, byte* source, long sstride, byte* recon, long rstride) =>
+    public static unsafe int PsyCost(int size, pixel* source, long sstride, pixel* recon, long rstride) =>
         X265Primitives.PsyCostPP(size, source, sstride, recon, rstride);
 
-    public ulong CalcPsyRdCost(uint distortion, uint bits, uint psycost) =>
+    public ulong CalcPsyRdCost(sse_t distortion, uint bits, uint psycost) =>
         distortion + ((m_lambda * m_psyRd * psycost) >> 24) + ((bits * m_lambda2) >> 8);
 
     public ulong CalcRdSADCost(uint sadCost, uint bits) => sadCost + (((bits * m_lambda) + 128) >> 8);
 
-    public uint ScaleChromaDist(uint plane, uint dist) => (uint)(((dist * (ulong)m_chromaDistWeight[plane - 1]) + 128) >> 8);
+    public sse_t ScaleChromaDist(uint plane, sse_t dist) => (sse_t)(((dist * (ulong)m_chromaDistWeight[plane - 1]) + 128) >> 8);
 
     public uint GetCost(uint bits) => (uint)(((bits * m_lambda) + 128) >> 8);
 }
@@ -91,22 +103,22 @@ internal unsafe struct IntraNeighbors
 internal unsafe class X265Predict
 {
     // unfiltered / filtered neighbours of the current partition
-    protected readonly byte* intraNeighbourBuf0;
-    protected readonly byte* intraNeighbourBuf1;
+    protected readonly pixel* intraNeighbourBuf0;
+    protected readonly pixel* intraNeighbourBuf1;
     protected int m_csp;
     protected int m_hChromaShift, m_vChromaShift;
 
     protected X265Predict(X265Arena arena, int csp)
     {
-        intraNeighbourBuf0 = arena.Alloc<byte>(258 + 16);
-        intraNeighbourBuf1 = arena.Alloc<byte>(258 + 16);
+        intraNeighbourBuf0 = arena.Alloc<pixel>(258 + 16);
+        intraNeighbourBuf1 = arena.Alloc<pixel>(258 + 16);
         m_csp = csp;
         m_hChromaShift = m_vChromaShift = csp == X265_CSP_I420 ? 1 : 0;
     }
 
-    protected byte* NeighbourBuf(int filter) => filter != 0 ? intraNeighbourBuf1 : intraNeighbourBuf0;
+    protected pixel* NeighbourBuf(int filter) => filter != 0 ? intraNeighbourBuf1 : intraNeighbourBuf0;
 
-    public void PredIntraLumaAng(uint dirMode, byte* dst, long stride, uint log2TrSize)
+    public void PredIntraLumaAng(uint dirMode, pixel* dst, long stride, uint log2TrSize)
     {
         int tuSize = 1 << (int)log2TrSize;
         int sizeIdx = (int)log2TrSize - 2;
@@ -115,7 +127,7 @@ internal unsafe class X265Predict
         X265Primitives.IntraPred(sizeIdx, (int)dirMode, dst, stride, NeighbourBuf(filter), bFilter);
     }
 
-    public void PredIntraChromaAng(uint dirMode, byte* dst, long stride, uint log2TrSizeC)
+    public void PredIntraChromaAng(uint dirMode, pixel* dst, long stride, uint log2TrSizeC)
     {
         int tuSize = 1 << (int)log2TrSizeC;
         int sizeIdx = (int)log2TrSizeC - 2;
@@ -128,14 +140,14 @@ internal unsafe class X265Predict
         int tuSize = 1 << intraNeighbors.log2TrSize;
         int tuSize2 = tuSize << 1;
         X265PicYuv reconPic = cu.m_encData.m_reconPic;
-        byte* adiOrigin = reconPic.GetLumaAddr(cu.m_cuAddr, cuGeom.absPartIdx + puAbsPartIdx);
+        pixel* adiOrigin = reconPic.GetLumaAddr(cu.m_cuAddr, cuGeom.absPartIdx + puAbsPartIdx);
         long picStride = reconPic.m_stride;
 
         FillReferenceSamples(adiOrigin, picStride, intraNeighbors, intraNeighbourBuf0);
 
-        byte* refBuf = intraNeighbourBuf0;
-        byte* fltBuf = intraNeighbourBuf1;
-        byte topLeft = refBuf[0], topLast = refBuf[tuSize2], leftLast = refBuf[tuSize2 + tuSize2];
+        pixel* refBuf = intraNeighbourBuf0;
+        pixel* fltBuf = intraNeighbourBuf1;
+        pixel topLeft = refBuf[0], topLast = refBuf[tuSize2], leftLast = refBuf[tuSize2 + tuSize2];
 
         bool doFilter = dirMode == ALL_IDX ? ((8 | 16 | 32) & tuSize) != 0 : (X265Tables.IntraFilterFlags[dirMode] & tuSize) != 0;
         if (doFilter)
@@ -143,7 +155,7 @@ internal unsafe class X265Predict
             if (cu.m_slice.m_sps.bUseStrongIntraSmoothing && tuSize == 32)
             {
                 const int threshold = 1 << (X265_DEPTH - 5);
-                byte topMiddle = refBuf[32], leftMiddle = refBuf[tuSize2 + 32];
+                pixel topMiddle = refBuf[32], leftMiddle = refBuf[tuSize2 + 32];
                 if (Math.Abs(topLeft + topLast - (topMiddle << 1)) < threshold &&
                     Math.Abs(topLeft + leftLast - (leftMiddle << 1)) < threshold)
                 {
@@ -154,8 +166,8 @@ internal unsafe class X265Predict
                     fltBuf[0] = topLeft;
                     for (int i = 1; i < tuSize2; i++)
                     {
-                        fltBuf[i + tuSize2] = (byte)((init + (deltaL * i)) >> shift);
-                        fltBuf[i] = (byte)((init + (deltaR * i)) >> shift);
+                        fltBuf[i + tuSize2] = (pixel)((init + (deltaL * i)) >> shift);
+                        fltBuf[i] = (pixel)((init + (deltaR * i)) >> shift);
                     }
 
                     fltBuf[tuSize2] = topLast;
@@ -171,7 +183,7 @@ internal unsafe class X265Predict
     public void InitAdiPatternChroma(X265CuData cu, in CUGeom cuGeom, uint puAbsPartIdx, in IntraNeighbors intraNeighbors, uint chromaId)
     {
         X265PicYuv reconPic = cu.m_encData.m_reconPic;
-        byte* adiOrigin = reconPic.GetChromaAddr(chromaId, cu.m_cuAddr, cuGeom.absPartIdx + puAbsPartIdx);
+        pixel* adiOrigin = reconPic.GetChromaAddr(chromaId, cu.m_cuAddr, cuGeom.absPartIdx + puAbsPartIdx);
         long picStride = reconPic.m_strideC;
         FillReferenceSamples(adiOrigin, picStride, intraNeighbors, intraNeighbourBuf0);
         if (m_csp == X265_CSP_I444)
@@ -219,9 +231,9 @@ internal unsafe class X265Predict
         intraNeighbors->log2TrSize = log2TrSize;
     }
 
-    public static void FillReferenceSamples(byte* adiOrigin, long picStride, in IntraNeighbors intraNeighbors, byte* dst)
+    public static void FillReferenceSamples(pixel* adiOrigin, long picStride, in IntraNeighbors intraNeighbors, pixel* dst)
     {
-        const byte dcValue = 1 << (X265_DEPTH - 1);
+        const pixel dcValue = 1 << (X265_DEPTH - 1);
         int numIntraNeighbor = intraNeighbors.numIntraNeighbor;
         int totalUnits = intraNeighbors.totalUnits;
         uint tuSize = 1u << intraNeighbors.log2TrSize;
@@ -234,8 +246,8 @@ internal unsafe class X265Predict
         }
         else if (numIntraNeighbor == totalUnits)
         {
-            byte* adiTemp = adiOrigin - picStride - 1;
-            Buffer.MemoryCopy(adiTemp, dst, refSize, refSize);
+            pixel* adiTemp = adiOrigin - picStride - 1;
+            Buffer.MemoryCopy(adiTemp, dst, refSize * sizeof(pixel), refSize * sizeof(pixel));
             adiTemp = adiOrigin - 1;
             for (uint i = 0; i < refSize - 1; i++)
             {
@@ -252,16 +264,16 @@ internal unsafe class X265Predict
                 int unitWidth = intraNeighbors.unitWidth;
                 int unitHeight = intraNeighbors.unitHeight;
                 int totalSamples = (leftUnits * unitHeight) + ((aboveUnits + 1) * unitWidth);
-                byte* adiLineBuffer = stackalloc byte[5 * MAX_CU_SIZE];
+                pixel* adiLineBuffer = stackalloc pixel[5 * MAX_CU_SIZE];
                 for (int i = 0; i < totalSamples; i++) adiLineBuffer[i] = dcValue;
 
                 // top-left sample
-                byte* adiTemp = adiOrigin - picStride - 1;
-                byte* adi = adiLineBuffer + (leftUnits * unitHeight);
+                pixel* adiTemp = adiOrigin - picStride - 1;
+                pixel* adi = adiLineBuffer + (leftUnits * unitHeight);
                 bool* pNeighborFlags = bNeighborFlags + leftUnits;
                 if (*pNeighborFlags)
                 {
-                    byte topLeftVal = adiTemp[0];
+                    pixel topLeftVal = adiTemp[0];
                     for (int i = 0; i < unitWidth; i++) adi[i] = topLeftVal;
                 }
 
@@ -276,7 +288,7 @@ internal unsafe class X265Predict
                 // above and above-right samples
                 adiTemp = adiOrigin - picStride;
                 adi = adiLineBuffer + (leftUnits * unitHeight) + unitWidth;
-                Buffer.MemoryCopy(adiTemp, adi, aboveUnits * unitWidth, aboveUnits * unitWidth);
+                Buffer.MemoryCopy(adiTemp, adi, aboveUnits * unitWidth * sizeof(pixel), aboveUnits * unitWidth * sizeof(pixel));
 
                 // pad the unavailable reference samples
                 int curr = 0;
@@ -286,13 +298,13 @@ internal unsafe class X265Predict
                 if (!bNeighborFlags[0])
                 {
                     while (next < totalUnits && !bNeighborFlags[next]) next++;
-                    byte* pAdiLineNext = adiLineBuffer + (next < leftUnits ? next * unitHeight : pAdiLineTopRowOffset + (next * unitWidth));
-                    byte refSample = *pAdiLineNext;
+                    pixel* pAdiLineNext = adiLineBuffer + (next < leftUnits ? next * unitHeight : pAdiLineTopRowOffset + (next * unitWidth));
+                    pixel refSample = *pAdiLineNext;
                     int nextOrTop = Math.Min(next, leftUnits);
                     if (curr < nextOrTop)
                     {
                         int fillSize = unitHeight * (nextOrTop - curr);
-                        new Span<byte>(adi, fillSize).Fill(refSample);
+                        new Span<pixel>(adi, fillSize).Fill(refSample);
                         curr = nextOrTop;
                         adi += fillSize;
                     }
@@ -300,7 +312,7 @@ internal unsafe class X265Predict
                     if (curr < next)
                     {
                         int fillSize = unitWidth * (next - curr);
-                        new Span<byte>(adi, fillSize).Fill(refSample);
+                        new Span<pixel>(adi, fillSize).Fill(refSample);
                         curr = next;
                         adi += fillSize;
                     }
@@ -311,7 +323,7 @@ internal unsafe class X265Predict
                     if (!bNeighborFlags[curr])
                     {
                         int numSamplesInCurrUnit = curr >= leftUnits ? unitWidth : unitHeight;
-                        byte refSample = *(adi - 1);
+                        pixel refSample = *(adi - 1);
                         for (int i = 0; i < numSamplesInCurrUnit; i++) adi[i] = refSample;
                         adi += numSamplesInCurrUnit;
                         curr++;
@@ -325,7 +337,7 @@ internal unsafe class X265Predict
 
                 // copy the processed samples
                 adi = adiLineBuffer + refSize + unitWidth - 2;
-                Buffer.MemoryCopy(adi, dst, refSize, refSize);
+                Buffer.MemoryCopy(adi, dst, refSize * sizeof(pixel), refSize * sizeof(pixel));
                 adi = adiLineBuffer + refSize - 1;
                 for (int i = 0; i < (int)refSize - 1; i++)
                 {

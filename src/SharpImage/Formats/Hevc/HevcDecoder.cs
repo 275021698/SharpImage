@@ -3,6 +3,7 @@
 
 using System;
 using System.Buffers;
+using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
 
 namespace SharpImage.Formats.Hevc;
@@ -3728,6 +3729,29 @@ internal sealed partial class HevcDecoder
         
         // first_slice_segment_in_pic_flag is bit 7, no_output_of_prior_pics_flag is bit 6
         return (payload[0] & 0x40) != 0;
+    }
+
+    /// <summary>
+    /// Decodes a still picture (an image item's access unit) and ends the stream there, so a picture the SPS's
+    /// reordering parameters would hold back in the DPB is output too.
+    /// </summary>
+    public DecodedVideoFrame? DecodeStill(ReadOnlySpan<byte> data)
+    {
+        // libheif's libde265 plugin (push_data): every NAL unit's 4-byte size must fit in the item's data (data without
+        // an hvcC's length-prefixed framing is read as Annex B)
+        for (long pos = 0; nalLengthSize == 4 && pos < data.Length;)
+        {
+            if (data.Length - pos < 4) throw new InvalidDataException("Insufficient data for a NAL unit size.");
+            uint size = BinaryPrimitives.ReadUInt32BigEndian(data.Slice((int)pos, 4));
+            pos += 4;
+            if (size > data.Length - pos) throw new InvalidDataException("NAL size exceeds the available data.");
+            pos += size;
+        }
+
+        var frame = Decode(data, 0, isKeyframe: true);
+        if (frame != null) return frame;
+        DrainPendingFrames();
+        return outputQueue.Count > 0 ? outputQueue.Dequeue() : null;
     }
 
     public void DrainPendingFrames()

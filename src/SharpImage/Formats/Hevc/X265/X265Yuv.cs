@@ -2,14 +2,24 @@
 // common/shortyuv.{h,cpp}: picture planes with x265's margins and CTU / 4x4-unit offset tables, and the CU-sized
 // pixel and residual buffers the analysis works in. 8-bit pixels; 4:2:0 or 4:0:0.
 using System;
-using static SharpImage.Formats.Hevc.X265.X265Const;
 
+#if HIGH_BIT_DEPTH
+namespace SharpImage.Formats.Hevc.X265.Hbd;
+#else
 namespace SharpImage.Formats.Hevc.X265;
+#endif
+
+using static X265Const;
+#if HIGH_BIT_DEPTH
+using pixel = ushort;
+#else
+using pixel = byte;
+#endif
 
 /// <summary>class PicYuv.</summary>
 internal sealed unsafe class X265PicYuv
 {
-    public readonly byte*[] m_picOrg = new byte*[3];
+    public readonly pixel*[] m_picOrg = new pixel*[3];
     public int m_picWidth, m_picHeight;
     public int m_stride, m_strideC;
     public int m_hChromaShift, m_vChromaShift;
@@ -31,7 +41,7 @@ internal sealed unsafe class X265PicYuv
         m_lumaMarginY = maxCUSize + 16;
         m_stride = (numCuInWidth * maxCUSize) + (m_lumaMarginX << 1);
         int maxHeight = numCuInHeight * maxCUSize;
-        byte* buf0 = arena.Alloc<byte>((long)m_stride * (maxHeight + (m_lumaMarginY * 2)));
+        pixel* buf0 = arena.Alloc<pixel>((long)m_stride * (maxHeight + (m_lumaMarginY * 2)));
         m_picOrg[0] = buf0 + (m_lumaMarginY * m_stride) + m_lumaMarginX;
         if (csp != X265_CSP_I400)
         {
@@ -39,8 +49,8 @@ internal sealed unsafe class X265PicYuv
             m_chromaMarginY = m_lumaMarginY >> m_vChromaShift;
             m_strideC = ((numCuInWidth * maxCUSize) >> m_hChromaShift) + (m_chromaMarginX * 2);
             long sizeC = (long)m_strideC * ((maxHeight >> m_vChromaShift) + (m_chromaMarginY * 2));
-            byte* buf1 = arena.Alloc<byte>(sizeC);
-            byte* buf2 = arena.Alloc<byte>(sizeC);
+            pixel* buf1 = arena.Alloc<pixel>(sizeC);
+            pixel* buf2 = arena.Alloc<pixel>(sizeC);
             m_picOrg[1] = buf1 + (m_chromaMarginY * m_strideC) + m_chromaMarginX;
             m_picOrg[2] = buf2 + (m_chromaMarginY * m_strideC) + m_chromaMarginX;
         }
@@ -91,24 +101,24 @@ internal sealed unsafe class X265PicYuv
         m_buOffsetC = other.m_buOffsetC;
     }
 
-    public byte* GetLumaAddr(uint ctuAddr) => m_picOrg[0] + m_cuOffsetY[ctuAddr];
+    public pixel* GetLumaAddr(uint ctuAddr) => m_picOrg[0] + m_cuOffsetY[ctuAddr];
 
-    public byte* GetLumaAddr(uint ctuAddr, uint absPartIdx) => m_picOrg[0] + m_cuOffsetY[ctuAddr] + m_buOffsetY[absPartIdx];
+    public pixel* GetLumaAddr(uint ctuAddr, uint absPartIdx) => m_picOrg[0] + m_cuOffsetY[ctuAddr] + m_buOffsetY[absPartIdx];
 
-    public byte* GetCbAddr(uint ctuAddr, uint absPartIdx) => m_picOrg[1] + m_cuOffsetC[ctuAddr] + m_buOffsetC[absPartIdx];
+    public pixel* GetCbAddr(uint ctuAddr, uint absPartIdx) => m_picOrg[1] + m_cuOffsetC[ctuAddr] + m_buOffsetC[absPartIdx];
 
-    public byte* GetCrAddr(uint ctuAddr, uint absPartIdx) => m_picOrg[2] + m_cuOffsetC[ctuAddr] + m_buOffsetC[absPartIdx];
+    public pixel* GetCrAddr(uint ctuAddr, uint absPartIdx) => m_picOrg[2] + m_cuOffsetC[ctuAddr] + m_buOffsetC[absPartIdx];
 
-    public byte* GetChromaAddr(uint chromaId, uint ctuAddr, uint absPartIdx) => m_picOrg[chromaId] + m_cuOffsetC[ctuAddr] + m_buOffsetC[absPartIdx];
+    public pixel* GetChromaAddr(uint chromaId, uint ctuAddr, uint absPartIdx) => m_picOrg[chromaId] + m_cuOffsetC[ctuAddr] + m_buOffsetC[absPartIdx];
 
-    public byte* GetChromaAddr(uint chromaId, uint ctuAddr) => m_picOrg[chromaId] + m_cuOffsetC[ctuAddr];
+    public pixel* GetChromaAddr(uint chromaId, uint ctuAddr) => m_picOrg[chromaId] + m_cuOffsetC[ctuAddr];
 
-    public byte* GetPlaneAddr(uint plane, uint ctuAddr) => m_picOrg[plane] + (plane != 0 ? m_cuOffsetC[ctuAddr] : m_cuOffsetY[ctuAddr]);
+    public pixel* GetPlaneAddr(uint plane, uint ctuAddr) => m_picOrg[plane] + (plane != 0 ? m_cuOffsetC[ctuAddr] : m_cuOffsetY[ctuAddr]);
 
-    /// <summary>PicYuv::copyFromPicture for 8-bit planes: the visible <paramref name="width"/> x <paramref name="height"/>
+    /// <summary>PicYuv::copyFromPicture for planes at the build's depth: the visible <paramref name="width"/> x <paramref name="height"/>
     /// samples, then the right / bottom edges replicated to a multiple of 16 plus one (the lowres downscale and AQ
     /// read them; the coded area is only padded to the minimum CU size).</summary>
-    public void CopyFromPicture(ReadOnlySpan<byte> y, ReadOnlySpan<byte> u, ReadOnlySpan<byte> v, int srcStride, int srcStrideC,
+    public void CopyFromPicture(ReadOnlySpan<pixel> y, ReadOnlySpan<pixel> u, ReadOnlySpan<pixel> v, int srcStride, int srcStrideC,
         int padx, int pady)
     {
         int width = m_picWidth - padx;
@@ -120,10 +130,10 @@ internal sealed unsafe class X265PicYuv
         padx++;
         pady++;
 
-        byte* Y = m_picOrg[0];
+        pixel* Y = m_picOrg[0];
         for (int r = 0; r < height; r++)
         {
-            y.Slice(r * srcStride, width).CopyTo(new Span<byte>(Y + ((long)r * m_stride), width));
+            y.Slice(r * srcStride, width).CopyTo(new Span<pixel>(Y + ((long)r * m_stride), width));
         }
 
         if (m_picCsp != X265_CSP_I400)
@@ -131,8 +141,8 @@ internal sealed unsafe class X265PicYuv
             int cwid = width >> m_hChromaShift;
             for (int r = 0; r < height >> m_vChromaShift; r++)
             {
-                u.Slice(r * srcStrideC, cwid).CopyTo(new Span<byte>(m_picOrg[1] + ((long)r * m_strideC), cwid));
-                v.Slice(r * srcStrideC, cwid).CopyTo(new Span<byte>(m_picOrg[2] + ((long)r * m_strideC), cwid));
+                u.Slice(r * srcStrideC, cwid).CopyTo(new Span<pixel>(m_picOrg[1] + ((long)r * m_strideC), cwid));
+                v.Slice(r * srcStrideC, cwid).CopyTo(new Span<pixel>(m_picOrg[2] + ((long)r * m_strideC), cwid));
             }
         }
 
@@ -150,13 +160,13 @@ internal sealed unsafe class X265PicYuv
         Y = m_picOrg[0] + ((long)(height - 1) * m_stride);
         for (int i = 1; i <= pady; i++)
         {
-            Buffer.MemoryCopy(Y, Y + ((long)i * m_stride), width + padx, width + padx);
+            Buffer.MemoryCopy(Y, Y + ((long)i * m_stride), (width + padx) * sizeof(pixel), (width + padx) * sizeof(pixel));
         }
 
         if (m_picCsp != X265_CSP_I400)
         {
-            byte* U = m_picOrg[1];
-            byte* V = m_picOrg[2];
+            pixel* U = m_picOrg[1];
+            pixel* V = m_picOrg[2];
             int cw = width >> m_hChromaShift;
             for (int r = 0; r < height >> m_vChromaShift; r++)
             {
@@ -175,8 +185,8 @@ internal sealed unsafe class X265PicYuv
             int n = (width + padx) >> m_hChromaShift;
             for (int j = 1; j <= pady >> m_vChromaShift; j++)
             {
-                Buffer.MemoryCopy(U, U + ((long)j * m_strideC), n, n);
-                Buffer.MemoryCopy(V, V + ((long)j * m_strideC), n, n);
+                Buffer.MemoryCopy(U, U + ((long)j * m_strideC), n * sizeof(pixel), n * sizeof(pixel));
+                Buffer.MemoryCopy(V, V + ((long)j * m_strideC), n * sizeof(pixel), n * sizeof(pixel));
             }
         }
     }
@@ -185,7 +195,7 @@ internal sealed unsafe class X265PicYuv
 /// <summary>class Yuv: pixels for a square CU (64x64 down to 8x8) in all planes.</summary>
 internal sealed unsafe class X265Yuv
 {
-    public readonly byte*[] m_buf = new byte*[3];
+    public readonly pixel*[] m_buf = new pixel*[3];
     public uint m_size;
     public uint m_csize;
     public int m_part;   // log2(size) - 2 (x265's partition enum for square sizes is used only as a size index here)
@@ -200,7 +210,7 @@ internal sealed unsafe class X265Yuv
         m_part = X265Tables.Log2Size[size] - 2;
         if (csp == X265_CSP_I400)
         {
-            m_buf[0] = arena.Alloc<byte>((size * size) + 64);
+            m_buf[0] = arena.Alloc<pixel>((size * size) + 64);
             m_csize = 0;
         }
         else
@@ -208,7 +218,7 @@ internal sealed unsafe class X265Yuv
             m_csize = size >> m_hChromaShift;
             uint sizeL = size * size;
             uint sizeC = sizeL >> (m_vChromaShift + m_hChromaShift);
-            m_buf[0] = arena.Alloc<byte>(sizeL + (sizeC * 2) + 8 + 64);
+            m_buf[0] = arena.Alloc<pixel>(sizeL + (sizeC * 2) + 8 + 64);
             m_buf[1] = m_buf[0] + sizeL;
             m_buf[2] = m_buf[0] + sizeL + sizeC;
         }
@@ -219,19 +229,19 @@ internal sealed unsafe class X265Yuv
     public int GetChromaAddrOffset(uint absPartIdx) =>
         (X265Tables.ZscanToPelX[absPartIdx] >> m_hChromaShift) + ((X265Tables.ZscanToPelY[absPartIdx] >> m_vChromaShift) * (int)m_csize);
 
-    public byte* GetLumaAddr(uint absPartIdx) => m_buf[0] + GetAddrOffset(absPartIdx, m_size);
+    public pixel* GetLumaAddr(uint absPartIdx) => m_buf[0] + GetAddrOffset(absPartIdx, m_size);
 
-    public byte* GetCbAddr(uint absPartIdx) => m_buf[1] + GetChromaAddrOffset(absPartIdx);
+    public pixel* GetCbAddr(uint absPartIdx) => m_buf[1] + GetChromaAddrOffset(absPartIdx);
 
-    public byte* GetCrAddr(uint absPartIdx) => m_buf[2] + GetChromaAddrOffset(absPartIdx);
+    public pixel* GetCrAddr(uint absPartIdx) => m_buf[2] + GetChromaAddrOffset(absPartIdx);
 
-    public byte* GetChromaAddr(uint chromaId, uint absPartIdx) => m_buf[chromaId] + GetChromaAddrOffset(absPartIdx);
+    public pixel* GetChromaAddr(uint chromaId, uint absPartIdx) => m_buf[chromaId] + GetChromaAddrOffset(absPartIdx);
 
-    private static void Copy(byte* dst, long dstStride, byte* src, long srcStride, int w, int h)
+    private static void Copy(pixel* dst, long dstStride, pixel* src, long srcStride, int w, int h)
     {
         for (int y = 0; y < h; y++)
         {
-            Buffer.MemoryCopy(src + (y * srcStride), dst + (y * dstStride), w, w);
+            Buffer.MemoryCopy(src + (y * srcStride), dst + (y * dstStride), w * sizeof(pixel), w * sizeof(pixel));
         }
     }
 

@@ -2,9 +2,19 @@
 // AQ, lambda), the recursive intra CU quadtree decision (2Nx2N, NxN at 8x8, split) and its split-flag and
 // delta-QP costs.
 using System;
-using static SharpImage.Formats.Hevc.X265.X265Const;
 
+#if HIGH_BIT_DEPTH
+namespace SharpImage.Formats.Hevc.X265.Hbd;
+#else
 namespace SharpImage.Formats.Hevc.X265;
+#endif
+
+using static X265Const;
+#if HIGH_BIT_DEPTH
+using pixel = ushort;
+#else
+using pixel = byte;
+#endif
 
 [System.Runtime.CompilerServices.SkipLocalsInit]
 internal sealed unsafe class X265Analysis : X265Search

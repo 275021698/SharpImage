@@ -2,9 +2,21 @@
 // RDO of the best candidates, the luma and chroma transform quadtree RDO with RDOQ, psy-rd costs, and the
 // delta-QP / split-flag cost helpers the CU analysis uses.
 using System;
-using static SharpImage.Formats.Hevc.X265.X265Const;
 
+#if HIGH_BIT_DEPTH
+namespace SharpImage.Formats.Hevc.X265.Hbd;
+#else
 namespace SharpImage.Formats.Hevc.X265;
+#endif
+
+using static X265Const;
+#if HIGH_BIT_DEPTH
+using pixel = ushort;
+using sse_t = ulong;
+#else
+using pixel = byte;
+using sse_t = uint;
+#endif
 
 /// <summary>struct Mode.</summary>
 internal sealed class X265Mode
@@ -20,10 +32,10 @@ internal sealed class X265Mode
     public uint sa8dBits;
     public uint psyEnergy;
     public uint ssimEnergy;
-    public uint resEnergy;
-    public uint lumaDistortion;
-    public uint chromaDistortion;
-    public uint distortion;
+    public sse_t resEnergy;
+    public sse_t lumaDistortion;
+    public sse_t chromaDistortion;
+    public sse_t distortion;
     public uint totalBits;
     public uint mvBits;
     public uint coeffBits;
@@ -66,7 +78,7 @@ internal struct X265Cost
 {
     public ulong rdcost;
     public uint bits;
-    public uint distortion;
+    public sse_t distortion;
     public uint energy;
 }
 
@@ -94,10 +106,10 @@ internal unsafe class X265Search : X265Predict
     protected readonly X265RqtData[] m_rqt = new X265RqtData[NUM_FULL_DEPTH];
     protected readonly byte*[] m_qtTempCbf = new byte*[3];
     protected readonly byte*[] m_qtTempTransformSkipFlag = new byte*[3];
-    protected readonly byte* m_intraPred;
-    protected readonly byte* m_fencScaled;
-    protected readonly byte* m_fencTransposed;
-    protected readonly byte* m_intraPredAngs;
+    protected readonly pixel* m_intraPred;
+    protected readonly pixel* m_fencScaled;
+    protected readonly pixel* m_fencTransposed;
+    protected readonly pixel* m_intraPredAngs;
     protected readonly int m_numLayers;
 
     protected X265Search(X265Arena arena, X265Param param) : base(arena, param.internalCsp)
@@ -152,7 +164,7 @@ internal unsafe class X265Search : X265Predict
             m_qtTempTransformSkipFlag[i] = arena.Alloc<byte>(numPartitions);
         }
 
-        m_intraPred = arena.Alloc<byte>((32 * 32) * (33 + 3));
+        m_intraPred = arena.Alloc<pixel>((32 * 32) * (33 + 3));
         m_fencScaled = m_intraPred + (32 * 32);
         m_fencTransposed = m_fencScaled + (32 * 32);
         m_intraPredAngs = m_fencTransposed + (32 * 32);
@@ -248,7 +260,7 @@ internal unsafe class X265Search : X265Predict
 
         X265Cost fullCost = default;
         uint bCBF = 0;
-        byte* reconQt = m_rqt[qtLayer].reconQtYuv.GetLumaAddr(absPartIdx);
+        pixel* reconQt = m_rqt[qtLayer].reconQtYuv.GetLumaAddr(absPartIdx);
         uint reconQtStride = m_rqt[qtLayer].reconQtYuv.m_size;
 
         if (mightNotSplit)
@@ -258,8 +270,8 @@ internal unsafe class X265Search : X265Predict
                 m_entropyCoder.Store(m_rqt[fullDepth].rqtRoot);
             }
 
-            byte* fenc = mode.fencYuv.GetLumaAddr(absPartIdx);
-            byte* pred = mode.predYuv.GetLumaAddr(absPartIdx);
+            pixel* fenc = mode.fencYuv.GetLumaAddr(absPartIdx);
+            pixel* pred = mode.predYuv.GetLumaAddr(absPartIdx);
             short* residual = m_rqt[cuGeom->depth].tmpResiYuv.GetLumaAddr(absPartIdx);
             uint stride = mode.fencYuv.m_size;
 
@@ -400,7 +412,7 @@ internal unsafe class X265Search : X265Predict
 
         // reconstruction for the next intra predictions (the full TU won)
         X265PicYuv reconPic = m_frame.m_reconPic;
-        byte* picReconY = reconPic.GetLumaAddr(cu.m_cuAddr, cuGeom->absPartIdx + absPartIdx);
+        pixel* picReconY = reconPic.GetLumaAddr(cu.m_cuAddr, cuGeom->absPartIdx + absPartIdx);
         X265Primitives.CopyPP(picReconY, reconPic.m_stride, reconQt, reconQtStride, 1 << (int)log2TrSize, 1 << (int)log2TrSize);
 
         outCost.rdcost += fullCost.rdcost;
@@ -488,15 +500,15 @@ internal unsafe class X265Search : X265Predict
             for (uint chromaId = TEXT_CHROMA_U; chromaId <= TEXT_CHROMA_V; chromaId++)
             {
                 int ttype = (int)chromaId;
-                byte* fenc = mode.fencYuv.GetChromaAddr(chromaId, absPartIdxC);
-                byte* pred = mode.predYuv.GetChromaAddr(chromaId, absPartIdxC);
+                pixel* fenc = mode.fencYuv.GetChromaAddr(chromaId, absPartIdxC);
+                pixel* pred = mode.predYuv.GetChromaAddr(chromaId, absPartIdxC);
                 short* residual = resiYuv.GetChromaAddr(chromaId, absPartIdxC);
                 uint coeffOffsetC = absPartIdxC << (LOG2_UNIT_SIZE * 2 - (m_hChromaShift + m_vChromaShift));
                 short* coeffC = m_rqt[qtLayer].coeffRQT[chromaId] + coeffOffsetC;
-                byte* reconQt = m_rqt[qtLayer].reconQtYuv.GetChromaAddr(chromaId, absPartIdxC);
+                pixel* reconQt = m_rqt[qtLayer].reconQtYuv.GetChromaAddr(chromaId, absPartIdxC);
                 uint reconQtStride = m_rqt[qtLayer].reconQtYuv.m_csize;
                 X265PicYuv reconPic = m_frame.m_reconPic;
-                byte* picReconC = reconPic.GetChromaAddr(chromaId, cu.m_cuAddr, cuGeom->absPartIdx + absPartIdxC);
+                pixel* picReconC = reconPic.GetChromaAddr(chromaId, cu.m_cuAddr, cuGeom->absPartIdx + absPartIdxC);
                 long picStride = reconPic.m_strideC;
 
                 uint chromaPredMode = cu.m_chromaIntraDir[absPartIdxC];
@@ -611,7 +623,7 @@ internal unsafe class X265Search : X265Predict
         CheckDQP(intraMode, cuGeom);
     }
 
-    private uint EstIntraPredQT(X265Mode intraMode, CUGeom* cuGeom, uint* depthRange)
+    private sse_t EstIntraPredQT(X265Mode intraMode, CUGeom* cuGeom, uint* depthRange)
     {
         X265CuData cu = intraMode.cu;
         X265Yuv reconYuv = intraMode.reconYuv;
@@ -626,7 +638,7 @@ internal unsafe class X265Search : X265Predict
         uint qNumParts = cuGeom->numPartitions >> 2;
         int sizeIdx = (int)log2TrSize - 2;
         uint absPartIdx = 0;
-        uint totalDistortion = 0;
+        sse_t totalDistortion = 0;
 
         ulong* candCostList = stackalloc ulong[MAX_RD_INTRA_MODES];
         uint* rdModeList = stackalloc uint[MAX_RD_INTRA_MODES];
@@ -651,7 +663,7 @@ internal unsafe class X265Search : X265Predict
                     InitAdiPattern(cu, *cuGeom, absPartIdx, intraNeighbors, ALL_IDX);
 
                     // the set of modes to test, from the prediction signal only
-                    byte* fenc = fencYuv.GetLumaAddr(absPartIdx);
+                    pixel* fenc = fencYuv.GetLumaAddr(absPartIdx);
                     uint stride = predYuv.m_size;
                     int scaleTuSize = (int)tuSize;
                     int scaleStride = (int)stride;
@@ -669,7 +681,7 @@ internal unsafe class X265Search : X265Predict
                     modeCosts[DC_IDX] = bcost = m_rdCost.CalcRdSADCost(sad, bits);
 
                     // PLANAR
-                    byte* planar = intraNeighbourBuf0;
+                    pixel* planar = intraNeighbourBuf0;
                     if (tuSize >= 8 && tuSize <= 32)
                     {
                         planar = intraNeighbourBuf1;
@@ -749,8 +761,8 @@ internal unsafe class X265Search : X265Predict
             if (puIdx != numPU - 1)
             {
                 X265PicYuv reconPic = m_frame.m_reconPic;
-                byte* dst = reconPic.GetLumaAddr(cu.m_cuAddr, cuGeom->absPartIdx + absPartIdx);
-                byte* src = reconYuv.GetLumaAddr(absPartIdx);
+                pixel* dst = reconPic.GetLumaAddr(cu.m_cuAddr, cuGeom->absPartIdx + absPartIdx);
+                pixel* src = reconYuv.GetLumaAddr(absPartIdx);
                 X265Primitives.CopyPP(dst, reconPic.m_stride, src, reconYuv.m_size, (int)tuSize, (int)tuSize);
             }
         }
@@ -770,7 +782,7 @@ internal unsafe class X265Search : X265Predict
         return totalDistortion;
     }
 
-    private uint EstIntraPredChromaQT(X265Mode intraMode, CUGeom* cuGeom)
+    private sse_t EstIntraPredChromaQT(X265Mode intraMode, CUGeom* cuGeom)
     {
         X265CuData cu = intraMode.cu;
         X265Yuv reconYuv = intraMode.reconYuv;
@@ -778,7 +790,7 @@ internal unsafe class X265Search : X265Predict
         uint initTuDepth = (cu.m_partSize[0] != SIZE_2Nx2N && m_csp == X265_CSP_I444) ? 1u : 0u;
         uint log2TrSize = cuGeom->log2CUSize - initTuDepth;
         uint absPartStep = cuGeom->numPartitions;
-        uint totalDistortion = 0;
+        sse_t totalDistortion = 0;
         int sizeC = (1 << (int)log2TrSize) >> m_hChromaShift;
         uint* modeList = stackalloc uint[NUM_CHROMA_MODE];
 
@@ -787,7 +799,7 @@ internal unsafe class X265Search : X265Predict
         {
             uint absPartIdxC = tuIterator.absPartIdxTURelCU;
             uint bestMode = 0;
-            uint bestDist = 0;
+            sse_t bestDist = 0;
             ulong bestCost = MAX_INT64;
             uint minMode = 0;
             uint maxMode = NUM_CHROMA_MODE;

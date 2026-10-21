@@ -2,9 +2,19 @@
 // psy-rdoq, or dead-zone quantization with sign-bit hiding), dequantization + inverse transform, and the
 // significance-context helpers shared with the entropy coder.
 using System;
-using static SharpImage.Formats.Hevc.X265.X265Const;
 
+#if HIGH_BIT_DEPTH
+namespace SharpImage.Formats.Hevc.X265.Hbd;
+#else
 namespace SharpImage.Formats.Hevc.X265;
+#endif
+
+using static X265Const;
+#if HIGH_BIT_DEPTH
+using pixel = ushort;
+#else
+using pixel = byte;
+#endif
 
 /// <summary>struct QpParam.</summary>
 internal struct QpParam
@@ -246,7 +256,7 @@ internal sealed unsafe class X265Quant
         return numSig;
     }
 
-    public uint TransformNxN(X265CuData cu, byte* fenc, uint fencStride, short* residual, uint resiStride, short* coeff,
+    public uint TransformNxN(X265CuData cu, pixel* fenc, uint fencStride, short* residual, uint resiStride, short* coeff,
         uint log2TrSize, int ttype, uint absPartIdx, bool useTransformSkip)
     {
         int sizeIdx = (int)log2TrSize - 2;

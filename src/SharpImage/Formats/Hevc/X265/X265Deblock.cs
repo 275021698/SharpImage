@@ -1,9 +1,19 @@
 // Port of x265 common/deblock.{h,cpp} and the deblocking primitives of common/loopfilter.cpp (intra pictures:
 // boundary strength 2 on every TU / CU edge, 0 at picture edges).
 using System;
-using static SharpImage.Formats.Hevc.X265.X265Const;
 
+#if HIGH_BIT_DEPTH
+namespace SharpImage.Formats.Hevc.X265.Hbd;
+#else
 namespace SharpImage.Formats.Hevc.X265;
+#endif
+
+using static X265Const;
+#if HIGH_BIT_DEPTH
+using pixel = ushort;
+#else
+using pixel = byte;
+#endif
 
 [System.Runtime.CompilerServices.SkipLocalsInit]
 internal static unsafe class X265Deblock
@@ -159,21 +169,21 @@ internal static unsafe class X265Deblock
         return 1;   // intra pictures only
     }
 
-    private static int CalcDP(byte* src, long offset) => Math.Abs(src[-offset * 3] - (2 * src[-offset * 2]) + src[-offset]);
+    private static int CalcDP(pixel* src, long offset) => Math.Abs(src[-offset * 3] - (2 * src[-offset * 2]) + src[-offset]);
 
-    private static int CalcDQ(byte* src, long offset) => Math.Abs(src[0] - (2 * src[offset]) + src[offset * 2]);
+    private static int CalcDQ(pixel* src, long offset) => Math.Abs(src[0] - (2 * src[offset]) + src[offset * 2]);
 
-    private static bool UseStrongFiltering(long offset, int beta, int tc, byte* src)
+    private static bool UseStrongFiltering(long offset, int beta, int tc, pixel* src)
     {
-        short m4 = src[0];
-        short m3 = src[-offset];
-        short m7 = src[offset * 3];
-        short m0 = src[-offset * 4];
+        short m4 = (short)src[0];
+        short m3 = (short)src[-offset];
+        short m7 = (short)src[offset * 3];
+        short m0 = (short)src[-offset * 4];
         int strong = Math.Abs(m0 - m3) + Math.Abs(m7 - m4);
         return strong < (beta >> 3) && Math.Abs(m3 - m4) < (((tc * 5) + 1) >> 1);
     }
 
-    private static void PelFilterLuma(byte* src, long srcStep, long offset, int tc, int maskP, int maskQ, int maskP1, int maskQ1)
+    private static void PelFilterLuma(pixel* src, long srcStep, long offset, int tc, int maskP, int maskQ, int maskP1, int maskQ1)
     {
         int thrCut = tc * 10;
         int tc2 = tc >> 1;
@@ -181,10 +191,10 @@ internal static unsafe class X265Deblock
         maskQ1 &= maskQ;
         for (int i = 0; i < UNIT_SIZE; i++, src += srcStep)
         {
-            short m4 = src[0];
-            short m3 = src[-offset];
-            short m5 = src[offset];
-            short m2 = src[-offset * 2];
+            short m4 = (short)src[0];
+            short m3 = (short)src[-offset];
+            short m5 = (short)src[offset];
+            short m2 = (short)src[-offset * 2];
             int delta = ((9 * (m4 - m3)) - (3 * (m5 - m2)) + 8) >> 4;
             if (Math.Abs(delta) < thrCut)
             {
@@ -193,14 +203,14 @@ internal static unsafe class X265Deblock
                 src[0] = ClipPixel(m4 - (delta & maskQ));
                 if (maskP1 != 0)
                 {
-                    short m1 = src[-offset * 3];
+                    short m1 = (short)src[-offset * 3];
                     int delta1 = Clip3(-tc2, tc2, ((((m1 + m3 + 1) >> 1) - m2 + delta) >> 1));
                     src[-offset * 2] = ClipPixel(m2 + delta1);
                 }
 
                 if (maskQ1 != 0)
                 {
-                    short m6 = src[offset * 2];
+                    short m6 = (short)src[offset * 2];
                     int delta2 = Clip3(-tc2, tc2, ((((m6 + m4 + 1) >> 1) - m5 - delta) >> 1));
                     src[offset] = ClipPixel(m5 + delta2);
                 }
@@ -208,31 +218,31 @@ internal static unsafe class X265Deblock
         }
     }
 
-    private static void PelFilterLumaStrong(byte* src, long srcStep, long offset, int tcP, int tcQ)
+    private static void PelFilterLumaStrong(pixel* src, long srcStep, long offset, int tcP, int tcQ)
     {
         for (int i = 0; i < UNIT_SIZE; i++, src += srcStep)
         {
-            short m4 = src[0];
-            short m3 = src[-offset];
-            short m5 = src[offset];
-            short m2 = src[-offset * 2];
-            short m6 = src[offset * 2];
-            short m1 = src[-offset * 3];
-            short m7 = src[offset * 3];
-            short m0 = src[-offset * 4];
-            src[-offset * 3] = (byte)(Clip3(-tcP, tcP, (((2 * m0) + (3 * m1) + m2 + m3 + m4 + 4) >> 3) - m1) + m1);
-            src[-offset * 2] = (byte)(Clip3(-tcP, tcP, ((m1 + m2 + m3 + m4 + 2) >> 2) - m2) + m2);
-            src[-offset] = (byte)(Clip3(-tcP, tcP, ((m1 + (2 * m2) + (2 * m3) + (2 * m4) + m5 + 4) >> 3) - m3) + m3);
-            src[0] = (byte)(Clip3(-tcQ, tcQ, ((m2 + (2 * m3) + (2 * m4) + (2 * m5) + m6 + 4) >> 3) - m4) + m4);
-            src[offset] = (byte)(Clip3(-tcQ, tcQ, ((m3 + m4 + m5 + m6 + 2) >> 2) - m5) + m5);
-            src[offset * 2] = (byte)(Clip3(-tcQ, tcQ, ((m3 + m4 + m5 + (3 * m6) + (2 * m7) + 4) >> 3) - m6) + m6);
+            short m4 = (short)src[0];
+            short m3 = (short)src[-offset];
+            short m5 = (short)src[offset];
+            short m2 = (short)src[-offset * 2];
+            short m6 = (short)src[offset * 2];
+            short m1 = (short)src[-offset * 3];
+            short m7 = (short)src[offset * 3];
+            short m0 = (short)src[-offset * 4];
+            src[-offset * 3] = (pixel)(Clip3(-tcP, tcP, (((2 * m0) + (3 * m1) + m2 + m3 + m4 + 4) >> 3) - m1) + m1);
+            src[-offset * 2] = (pixel)(Clip3(-tcP, tcP, ((m1 + m2 + m3 + m4 + 2) >> 2) - m2) + m2);
+            src[-offset] = (pixel)(Clip3(-tcP, tcP, ((m1 + (2 * m2) + (2 * m3) + (2 * m4) + m5 + 4) >> 3) - m3) + m3);
+            src[0] = (pixel)(Clip3(-tcQ, tcQ, ((m2 + (2 * m3) + (2 * m4) + (2 * m5) + m6 + 4) >> 3) - m4) + m4);
+            src[offset] = (pixel)(Clip3(-tcQ, tcQ, ((m3 + m4 + m5 + m6 + 2) >> 2) - m5) + m5);
+            src[offset * 2] = (pixel)(Clip3(-tcQ, tcQ, ((m3 + m4 + m5 + (3 * m6) + (2 * m7) + 4) >> 3) - m6) + m6);
         }
     }
 
     private static void EdgeFilterLuma(X265CuData cuQ, uint absPartIdx, uint depth, int dir, int edge, byte* blockStrength)
     {
         X265PicYuv reconPic = cuQ.m_encData.m_reconPic;
-        byte* src = reconPic.GetLumaAddr(cuQ.m_cuAddr, absPartIdx);
+        pixel* src = reconPic.GetLumaAddr(cuQ.m_cuAddr, absPartIdx);
         long stride = reconPic.m_stride;
         X265Pps pps = cuQ.m_slice.m_pps;
         long offset, srcStep;
@@ -268,7 +278,7 @@ internal static unsafe class X265Deblock
             int qpP = cuP.m_qp[partP];
             int qp = (qpP + qpQ + 1) >> 1;
             int indexB = Clip3(0, QP_MAX_SPEC, qp + betaOffset);
-            int beta = s_betaTable[indexB];
+            int beta = s_betaTable[indexB] << (X265_DEPTH - 8);
 
             long unitOffset = (idx * srcStep) << LOG2_UNIT_SIZE;
             int dp0 = CalcDP(src + unitOffset, offset);
@@ -284,7 +294,7 @@ internal static unsafe class X265Deblock
             }
 
             int indexTC = Clip3(0, QP_MAX_SPEC + DEFAULT_INTRA_TC_OFFSET, (int)(qp + (DEFAULT_INTRA_TC_OFFSET * (bs - 1)) + tcOffset));
-            int tc = s_tcTable[indexTC];
+            int tc = s_tcTable[indexTC] << (X265_DEPTH - 8);
             bool sw = (2 * d0) < (beta >> 2) && (2 * d3) < (beta >> 2) &&
                       UseStrongFiltering(offset, beta, tc, src + unitOffset) &&
                       UseStrongFiltering(offset, beta, tc, src + unitOffset + (srcStep * 3));
@@ -305,15 +315,15 @@ internal static unsafe class X265Deblock
         }
     }
 
-    private static void PelFilterChroma(byte* src, long srcStep, long offset, int tc, int maskP, int maskQ)
+    private static void PelFilterChroma(pixel* src, long srcStep, long offset, int tc, int maskP, int maskQ)
     {
         for (int i = 0; i < 4; i++)
         {
-            byte* s = src + (i * srcStep);
-            short m2 = s[-offset * 2];
-            short m3 = s[-offset];
-            short m4 = s[0];
-            short m5 = s[offset];
+            pixel* s = src + (i * srcStep);
+            short m2 = (short)s[-offset * 2];
+            short m3 = (short)s[-offset];
+            short m4 = (short)s[0];
+            short m5 = (short)s[offset];
             int delta = Clip3(-tc, tc, (((m4 - m3) * 4) + m2 - m5 + 4) >> 3);
             s[-offset] = ClipPixel(m3 + (delta & maskP));
             s[0] = ClipPixel(m4 - (delta & maskQ));
@@ -346,8 +356,8 @@ internal static unsafe class X265Deblock
             srcStep = 1;
         }
 
-        byte* srcChroma0 = reconPic.m_picOrg[1] + srcOffset;
-        byte* srcChroma1 = reconPic.m_picOrg[2] + srcOffset;
+        pixel* srcChroma0 = reconPic.m_picOrg[1] + srcOffset;
+        pixel* srcChroma1 = reconPic.m_picOrg[2] + srcOffset;
         uint numUnits = cuQ.m_slice.m_sps.numPartInCUSize >> (int)(depth + (uint)chromaShift);
         for (uint idx = 0; idx < numUnits; idx++)
         {
@@ -372,8 +382,8 @@ internal static unsafe class X265Deblock
                 }
 
                 int indexTC = Clip3(0, QP_MAX_SPEC + DEFAULT_INTRA_TC_OFFSET, qp + DEFAULT_INTRA_TC_OFFSET + tcOffset);
-                int tc = s_tcTable[indexTC];
-                byte* srcC = chromaIdx == 0 ? srcChroma0 : srcChroma1;
+                int tc = s_tcTable[indexTC] << (X265_DEPTH - 8);
+                pixel* srcC = chromaIdx == 0 ? srcChroma0 : srcChroma1;
                 PelFilterChroma(srcC + unitOffset, srcStep, offset, tc, maskP, maskQ);
             }
         }

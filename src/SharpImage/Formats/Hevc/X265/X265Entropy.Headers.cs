@@ -1,8 +1,13 @@
 // Port of x265 encoder/entropy.cpp parameter-set and slice-header writers (single layer, no scaling lists, no
 // SCC / multiview / alpha extensions).
-using static SharpImage.Formats.Hevc.X265.X265Const;
 
+#if HIGH_BIT_DEPTH
+namespace SharpImage.Formats.Hevc.X265.Hbd;
+#else
 namespace SharpImage.Formats.Hevc.X265;
+#endif
+
+using static X265Const;
 
 internal sealed unsafe partial class X265Entropy
 {

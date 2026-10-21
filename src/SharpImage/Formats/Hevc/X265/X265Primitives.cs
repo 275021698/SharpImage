@@ -1,21 +1,37 @@
 // Port of the x265 C primitives the intra encoder uses (common/pixel.cpp, dct.cpp, intrapred.cpp): SAD / SSE /
 // SATD / SA8D (x264's SWAR form, kept exact: 16-bit lanes in a 32-bit word), psy cost, residual / reconstruction
 // helpers, the forward and inverse DCT / DST, quantizers, the entropy cost kernels and intra prediction.
-// 8-bit build: pixel = byte, sum_t = ushort, sum2_t = uint, sse_t = uint.
+// 8-bit build: pixel = byte, sum_t = ushort, sum2_t = uint, sse_t = uint; HIGH_BIT_DEPTH: ushort, uint, ulong, ulong.
 using System;
 using System.Runtime.CompilerServices;
-using static SharpImage.Formats.Hevc.X265.X265Const;
 
+#if HIGH_BIT_DEPTH
+namespace SharpImage.Formats.Hevc.X265.Hbd;
+#else
 namespace SharpImage.Formats.Hevc.X265;
+#endif
+
+using static X265Const;
+#if HIGH_BIT_DEPTH
+using pixel = ushort;
+using sum_t = uint;
+using sum2_t = ulong;
+using sse_t = ulong;
+#else
+using pixel = byte;
+using sum_t = ushort;
+using sum2_t = uint;
+using sse_t = uint;
+#endif
 
 [SkipLocalsInit]
 internal static unsafe class X265Primitives
 {
-    private const int BITS_PER_SUM = 16;
+    private const int BITS_PER_SUM = 8 * sizeof(sum_t);
 
     // ---- pixel comparisons ----
 
-    public static int Sad(byte* pix1, long stride1, byte* pix2, long stride2, int lx, int ly)
+    public static int Sad(pixel* pix1, long stride1, pixel* pix2, long stride2, int lx, int ly)
     {
         int sum = 0;
         for (int y = 0; y < ly; y++)
@@ -32,15 +48,15 @@ internal static unsafe class X265Primitives
         return sum;
     }
 
-    public static uint SsePP(byte* pix1, long stride1, byte* pix2, long stride2, int lx, int ly)
+    public static sse_t SsePP(pixel* pix1, long stride1, pixel* pix2, long stride2, int lx, int ly)
     {
-        uint sum = 0;
+        sse_t sum = 0;
         for (int y = 0; y < ly; y++)
         {
             for (int x = 0; x < lx; x++)
             {
                 int tmp = pix1[x] - pix2[x];
-                sum += (uint)(tmp * tmp);
+                sum += (sse_t)(tmp * tmp);
             }
 
             pix1 += stride1;
@@ -51,90 +67,90 @@ internal static unsafe class X265Primitives
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void Hadamard4(out uint d0, out uint d1, out uint d2, out uint d3, uint s0, uint s1, uint s2, uint s3)
+    private static void Hadamard4(out sum2_t d0, out sum2_t d1, out sum2_t d2, out sum2_t d3, sum2_t s0, sum2_t s1, sum2_t s2, sum2_t s3)
     {
-        uint t0 = s0 + s1;
-        uint t1 = s0 - s1;
-        uint t2 = s2 + s3;
-        uint t3 = s2 - s3;
+        sum2_t t0 = s0 + s1;
+        sum2_t t1 = s0 - s1;
+        sum2_t t2 = s2 + s3;
+        sum2_t t3 = s2 - s3;
         d0 = t0 + t2;
         d2 = t0 - t2;
         d1 = t1 + t3;
         d3 = t1 - t3;
     }
 
-    /// <summary>abs2: |x| + (|y| &lt;&lt; 16) of a pseudo-SIMD x + (y &lt;&lt; 16).</summary>
+    /// <summary>abs2: |x| + (|y| &lt;&lt; BITS_PER_SUM) of a pseudo-SIMD x + (y &lt;&lt; BITS_PER_SUM).</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static uint Abs2(uint a)
+    private static sum2_t Abs2(sum2_t a)
     {
-        uint s = ((a >> (BITS_PER_SUM - 1)) & ((1u << BITS_PER_SUM) + 1)) * 0xFFFF;
+        sum2_t s = ((a >> (BITS_PER_SUM - 1)) & (((sum2_t)1 << BITS_PER_SUM) + 1)) * sum_t.MaxValue;
         return (a + s) ^ s;
     }
 
-    public static int Satd4x4(byte* pix1, long stride1, byte* pix2, long stride2)
+    public static int Satd4x4(pixel* pix1, long stride1, pixel* pix2, long stride2)
     {
-        uint* tmp = stackalloc uint[8];
-        uint sum = 0;
+        sum2_t* tmp = stackalloc sum2_t[8];
+        sum2_t sum = 0;
         for (int i = 0; i < 4; i++, pix1 += stride1, pix2 += stride2)
         {
-            uint a0 = (uint)(pix1[0] - pix2[0]);
-            uint a1 = (uint)(pix1[1] - pix2[1]);
-            uint b0 = (a0 + a1) + ((a0 - a1) << BITS_PER_SUM);
-            uint a2 = (uint)(pix1[2] - pix2[2]);
-            uint a3 = (uint)(pix1[3] - pix2[3]);
-            uint b1 = (a2 + a3) + ((a2 - a3) << BITS_PER_SUM);
+            sum2_t a0 = (sum2_t)(pix1[0] - pix2[0]);
+            sum2_t a1 = (sum2_t)(pix1[1] - pix2[1]);
+            sum2_t b0 = (a0 + a1) + ((a0 - a1) << BITS_PER_SUM);
+            sum2_t a2 = (sum2_t)(pix1[2] - pix2[2]);
+            sum2_t a3 = (sum2_t)(pix1[3] - pix2[3]);
+            sum2_t b1 = (a2 + a3) + ((a2 - a3) << BITS_PER_SUM);
             tmp[(i * 2) + 0] = b0 + b1;
             tmp[(i * 2) + 1] = b0 - b1;
         }
 
         for (int i = 0; i < 2; i++)
         {
-            Hadamard4(out uint a0, out uint a1, out uint a2, out uint a3, tmp[i], tmp[2 + i], tmp[4 + i], tmp[6 + i]);
+            Hadamard4(out sum2_t a0, out sum2_t a1, out sum2_t a2, out sum2_t a3, tmp[i], tmp[2 + i], tmp[4 + i], tmp[6 + i]);
             a0 = Abs2(a0) + Abs2(a1) + Abs2(a2) + Abs2(a3);
-            sum += (uint)(ushort)a0 + (a0 >> BITS_PER_SUM);
+            sum += (sum_t)a0 + (a0 >> BITS_PER_SUM);
         }
 
         return (int)(sum >> 1);
     }
 
-    private static int Sa8d8x8Raw(byte* pix1, long i1, byte* pix2, long i2)
+    private static int Sa8d8x8Raw(pixel* pix1, long i1, pixel* pix2, long i2)
     {
-        uint* tmp = stackalloc uint[32];
-        uint sum = 0;
+        sum2_t* tmp = stackalloc sum2_t[32];
+        sum2_t sum = 0;
         for (int i = 0; i < 8; i++, pix1 += i1, pix2 += i2)
         {
-            uint a0 = (uint)(pix1[0] - pix2[0]);
-            uint a1 = (uint)(pix1[1] - pix2[1]);
-            uint b0 = (a0 + a1) + ((a0 - a1) << BITS_PER_SUM);
-            uint a2 = (uint)(pix1[2] - pix2[2]);
-            uint a3 = (uint)(pix1[3] - pix2[3]);
-            uint b1 = (a2 + a3) + ((a2 - a3) << BITS_PER_SUM);
-            uint a4 = (uint)(pix1[4] - pix2[4]);
-            uint a5 = (uint)(pix1[5] - pix2[5]);
-            uint b2 = (a4 + a5) + ((a4 - a5) << BITS_PER_SUM);
-            uint a6 = (uint)(pix1[6] - pix2[6]);
-            uint a7 = (uint)(pix1[7] - pix2[7]);
-            uint b3 = (a6 + a7) + ((a6 - a7) << BITS_PER_SUM);
+            sum2_t a0 = (sum2_t)(pix1[0] - pix2[0]);
+            sum2_t a1 = (sum2_t)(pix1[1] - pix2[1]);
+            sum2_t b0 = (a0 + a1) + ((a0 - a1) << BITS_PER_SUM);
+            sum2_t a2 = (sum2_t)(pix1[2] - pix2[2]);
+            sum2_t a3 = (sum2_t)(pix1[3] - pix2[3]);
+            sum2_t b1 = (a2 + a3) + ((a2 - a3) << BITS_PER_SUM);
+            sum2_t a4 = (sum2_t)(pix1[4] - pix2[4]);
+            sum2_t a5 = (sum2_t)(pix1[5] - pix2[5]);
+            sum2_t b2 = (a4 + a5) + ((a4 - a5) << BITS_PER_SUM);
+            sum2_t a6 = (sum2_t)(pix1[6] - pix2[6]);
+            sum2_t a7 = (sum2_t)(pix1[7] - pix2[7]);
+            sum2_t b3 = (a6 + a7) + ((a6 - a7) << BITS_PER_SUM);
             Hadamard4(out tmp[(i * 4) + 0], out tmp[(i * 4) + 1], out tmp[(i * 4) + 2], out tmp[(i * 4) + 3], b0, b1, b2, b3);
         }
 
         for (int i = 0; i < 4; i++)
         {
-            Hadamard4(out uint a0, out uint a1, out uint a2, out uint a3, tmp[i], tmp[4 + i], tmp[8 + i], tmp[12 + i]);
-            Hadamard4(out uint a4, out uint a5, out uint a6, out uint a7, tmp[16 + i], tmp[20 + i], tmp[24 + i], tmp[28 + i]);
-            uint b0 = Abs2(a0 + a4) + Abs2(a0 - a4);
+            Hadamard4(out sum2_t a0, out sum2_t a1, out sum2_t a2, out sum2_t a3, tmp[i], tmp[4 + i], tmp[8 + i], tmp[12 + i]);
+            Hadamard4(out sum2_t a4, out sum2_t a5, out sum2_t a6, out sum2_t a7, tmp[16 + i], tmp[20 + i], tmp[24 + i], tmp[28 + i]);
+            sum2_t b0 = Abs2(a0 + a4) + Abs2(a0 - a4);
             b0 += Abs2(a1 + a5) + Abs2(a1 - a5);
             b0 += Abs2(a2 + a6) + Abs2(a2 - a6);
             b0 += Abs2(a3 + a7) + Abs2(a3 - a7);
-            sum += (uint)(ushort)b0 + (b0 >> BITS_PER_SUM);
+            sum += (sum_t)b0 + (b0 >> BITS_PER_SUM);
         }
 
         return (int)sum;
     }
 
-    public static int Sa8d8x8(byte* pix1, long i1, byte* pix2, long i2) => (Sa8d8x8Raw(pix1, i1, pix2, i2) + 2) >> 2;
+    public static int Sa8d8x8(pixel* pix1, long i1, pixel* pix2, long i2) => (Sa8d8x8Raw(pix1, i1, pix2, i2) + 2) >> 2;
 
-    private static int Sa8d16x16(byte* pix1, long i1, byte* pix2, long i2)
+    private static int Sa8d16x16(pixel* pix1, long i1, pixel* pix2, long i2)
     {
         int sum = Sa8d8x8Raw(pix1, i1, pix2, i2)
                   + Sa8d8x8Raw(pix1 + 8, i1, pix2 + 8, i2)
@@ -144,7 +160,7 @@ internal static unsafe class X265Primitives
     }
 
     /// <summary>primitives.cu[sizeIdx].sa8d (4x4: satd).</summary>
-    public static int Sa8d(int sizeIdx, byte* pix1, long i1, byte* pix2, long i2)
+    public static int Sa8d(int sizeIdx, pixel* pix1, long i1, pixel* pix2, long i2)
     {
         switch (sizeIdx)
         {
@@ -168,10 +184,10 @@ internal static unsafe class X265Primitives
         }
     }
 
-    private static readonly byte* ZeroBuf = (byte*)System.Runtime.InteropServices.NativeMemory.AllocZeroed(64);
+    private static readonly pixel* ZeroBuf = (pixel*)System.Runtime.InteropServices.NativeMemory.AllocZeroed(64 * sizeof(pixel));
 
     /// <summary>psyCost_pp: |AC energy(source) - AC energy(recon)| per 8x8 (4x4 uses satd).</summary>
-    public static int PsyCostPP(int sizeIdx, byte* source, long sstride, byte* recon, long rstride)
+    public static int PsyCostPP(int sizeIdx, pixel* source, long sstride, pixel* recon, long rstride)
     {
         if (sizeIdx != 0)
         {
@@ -196,7 +212,7 @@ internal static unsafe class X265Primitives
     }
 
     /// <summary>pixel_var: sum + (sum of squares &lt;&lt; 32) of a size x size block.</summary>
-    public static ulong PixelVar(byte* pix, long stride, int size)
+    public static ulong PixelVar(pixel* pix, long stride, int size)
     {
         uint sum = 0, sqr = 0;
         for (int y = 0; y < size; y++)
@@ -215,21 +231,21 @@ internal static unsafe class X265Primitives
 
     // ---- copies and residuals ----
 
-    public static void CopyPP(byte* dst, long dstStride, byte* src, long srcStride, int w, int h)
+    public static void CopyPP(pixel* dst, long dstStride, pixel* src, long srcStride, int w, int h)
     {
         for (int y = 0; y < h; y++)
         {
-            Buffer.MemoryCopy(src + (y * srcStride), dst + (y * dstStride), w, w);
+            Buffer.MemoryCopy(src + (y * srcStride), dst + (y * dstStride), w * sizeof(pixel), w * sizeof(pixel));
         }
     }
 
-    public static void CopyPS(short* dst, long dstStride, byte* src, long srcStride, int n)
+    public static void CopyPS(short* dst, long dstStride, pixel* src, long srcStride, int n)
     {
         for (int y = 0; y < n; y++)
         {
             for (int x = 0; x < n; x++)
             {
-                dst[x] = src[x];
+                dst[x] = (short)src[x];
             }
 
             dst += dstStride;
@@ -237,7 +253,7 @@ internal static unsafe class X265Primitives
         }
     }
 
-    public static void GetResidual(byte* fenc, byte* pred, short* residual, long stride, int n)
+    public static void GetResidual(pixel* fenc, pixel* pred, short* residual, long stride, int n)
     {
         for (int y = 0; y < n; y++)
         {
@@ -252,7 +268,7 @@ internal static unsafe class X265Primitives
         }
     }
 
-    public static void AddPS(byte* a, long dstride, byte* b0, short* b1, long sstride0, long sstride1, int n)
+    public static void AddPS(pixel* a, long dstride, pixel* b0, short* b1, long sstride0, long sstride1, int n)
     {
         for (int y = 0; y < n; y++)
         {
@@ -267,7 +283,7 @@ internal static unsafe class X265Primitives
         }
     }
 
-    public static void Transpose(byte* dst, byte* src, long stride, int n)
+    public static void Transpose(pixel* dst, pixel* src, long stride, int n)
     {
         for (int k = 0; k < n; k++)
         {
@@ -1045,43 +1061,43 @@ internal static unsafe class X265Primitives
     // ---- intra prediction ----
 
     /// <summary>intraFilter: [1 2 1] filtering of the left and top reference samples.</summary>
-    public static void IntraFilter(int tuSize, byte* samples, byte* filtered)
+    public static void IntraFilter(int tuSize, pixel* samples, pixel* filtered)
     {
         int tuSize2 = tuSize << 1;
-        byte topLeft = samples[0], topLast = samples[tuSize2], leftLast = samples[tuSize2 + tuSize2];
+        pixel topLeft = samples[0], topLast = samples[tuSize2], leftLast = samples[tuSize2 + tuSize2];
         for (int i = 1; i < tuSize2; i++)
         {
-            filtered[i] = (byte)(((samples[i] << 1) + samples[i - 1] + samples[i + 1] + 2) >> 2);
+            filtered[i] = (pixel)(((samples[i] << 1) + samples[i - 1] + samples[i + 1] + 2) >> 2);
         }
 
         filtered[tuSize2] = topLast;
-        filtered[0] = (byte)(((topLeft << 1) + samples[1] + samples[tuSize2 + 1] + 2) >> 2);
-        filtered[tuSize2 + 1] = (byte)(((samples[tuSize2 + 1] << 1) + topLeft + samples[tuSize2 + 2] + 2) >> 2);
+        filtered[0] = (pixel)(((topLeft << 1) + samples[1] + samples[tuSize2 + 1] + 2) >> 2);
+        filtered[tuSize2 + 1] = (pixel)(((samples[tuSize2 + 1] << 1) + topLeft + samples[tuSize2 + 2] + 2) >> 2);
         for (int i = tuSize2 + 2; i < tuSize2 + tuSize2; i++)
         {
-            filtered[i] = (byte)(((samples[i] << 1) + samples[i - 1] + samples[i + 1] + 2) >> 2);
+            filtered[i] = (pixel)(((samples[i] << 1) + samples[i - 1] + samples[i + 1] + 2) >> 2);
         }
 
         filtered[tuSize2 + tuSize2] = leftLast;
     }
 
-    private static void DcPredFilter(byte* above, byte* left, byte* dst, long dststride, int size)
+    private static void DcPredFilter(pixel* above, pixel* left, pixel* dst, long dststride, int size)
     {
-        dst[0] = (byte)((above[0] + left[0] + (2 * dst[0]) + 2) >> 2);
+        dst[0] = (pixel)((above[0] + left[0] + (2 * dst[0]) + 2) >> 2);
         for (int x = 1; x < size; x++)
         {
-            dst[x] = (byte)((above[x] + (3 * dst[x]) + 2) >> 2);
+            dst[x] = (pixel)((above[x] + (3 * dst[x]) + 2) >> 2);
         }
 
         dst += dststride;
         for (int y = 1; y < size; y++)
         {
-            *dst = (byte)((left[y] + (3 * *dst) + 2) >> 2);
+            *dst = (pixel)((left[y] + (3 * *dst) + 2) >> 2);
             dst += dststride;
         }
     }
 
-    public static void IntraPredDc(int width, byte* dst, long dstStride, byte* srcPix, int bFilter)
+    public static void IntraPredDc(int width, pixel* dst, long dstStride, pixel* srcPix, int bFilter)
     {
         int dcVal = width;
         for (int i = 0; i < width; i++)
@@ -1094,7 +1110,7 @@ internal static unsafe class X265Primitives
         {
             for (int l = 0; l < width; l++)
             {
-                dst[(k * dstStride) + l] = (byte)dcVal;
+                dst[(k * dstStride) + l] = (pixel)dcVal;
             }
         }
 
@@ -1104,18 +1120,18 @@ internal static unsafe class X265Primitives
         }
     }
 
-    public static void PlanarPred(int log2Size, byte* dst, long dstStride, byte* srcPix)
+    public static void PlanarPred(int log2Size, pixel* dst, long dstStride, pixel* srcPix)
     {
         int blkSize = 1 << log2Size;
-        byte* above = srcPix + 1;
-        byte* left = srcPix + (2 * blkSize) + 1;
+        pixel* above = srcPix + 1;
+        pixel* left = srcPix + (2 * blkSize) + 1;
         int topRight = above[blkSize];
         int bottomLeft = left[blkSize];
         for (int y = 0; y < blkSize; y++)
         {
             for (int x = 0; x < blkSize; x++)
             {
-                dst[(y * dstStride) + x] = (byte)((((blkSize - 1 - x) * left[y]) + ((blkSize - 1 - y) * above[x]) + ((x + 1) * topRight) + ((y + 1) * bottomLeft) + blkSize) >> (log2Size + 1));
+                dst[(y * dstStride) + x] = (pixel)((((blkSize - 1 - x) * left[y]) + ((blkSize - 1 - y) * above[x]) + ((x + 1) * topRight) + ((y + 1) * bottomLeft) + blkSize) >> (log2Size + 1));
             }
         }
     }
@@ -1123,12 +1139,12 @@ internal static unsafe class X265Primitives
     private static readonly sbyte[] AngleTable = { -32, -26, -21, -17, -13, -9, -5, -2, 0, 2, 5, 9, 13, 17, 21, 26, 32 };
     private static readonly short[] InvAngleTable = { 4096, 1638, 910, 630, 482, 390, 315, 256 };
 
-    public static void IntraPredAng(int width, byte* dst, long dstStride, byte* srcPix0, int dirMode, int bFilter)
+    public static void IntraPredAng(int width, pixel* dst, long dstStride, pixel* srcPix0, int dirMode, int bFilter)
     {
         int width2 = width << 1;
         bool horMode = dirMode < 18;
-        byte* neighbourBuf = stackalloc byte[129];
-        byte* srcPix = srcPix0;
+        pixel* neighbourBuf = stackalloc pixel[129];
+        pixel* srcPix = srcPix0;
         if (horMode)
         {
             neighbourBuf[0] = srcPix[0];
@@ -1164,12 +1180,12 @@ internal static unsafe class X265Primitives
         }
         else
         {
-            byte* refBuf = stackalloc byte[64];
-            byte* refp;
+            pixel* refBuf = stackalloc pixel[64];
+            pixel* refp;
             if (angle < 0)
             {
                 int nbProjected = -((width * angle) >> 5) - 1;
-                byte* refPix = refBuf + nbProjected + 1;
+                pixel* refPix = refBuf + nbProjected + 1;
                 int invAngle = InvAngleTable[-angleOffset - 1];
                 int invAngleSum = 128;
                 for (int i = 0; i < nbProjected; i++)
@@ -1200,7 +1216,7 @@ internal static unsafe class X265Primitives
                 {
                     for (int x = 0; x < width; x++)
                     {
-                        dst[(y * dstStride) + x] = (byte)((((32 - fraction) * refp[offset + x]) + (fraction * refp[offset + x + 1]) + 16) >> 5);
+                        dst[(y * dstStride) + x] = (pixel)((((32 - fraction) * refp[offset + x]) + (fraction * refp[offset + x + 1]) + 16) >> 5);
                     }
                 }
                 else
@@ -1219,7 +1235,7 @@ internal static unsafe class X265Primitives
             {
                 for (int x = y + 1; x < width; x++)
                 {
-                    byte tmp = dst[(y * dstStride) + x];
+                    pixel tmp = dst[(y * dstStride) + x];
                     dst[(y * dstStride) + x] = dst[(x * dstStride) + y];
                     dst[(x * dstStride) + y] = tmp;
                 }
@@ -1228,7 +1244,7 @@ internal static unsafe class X265Primitives
     }
 
     /// <summary>primitives.cu[sizeIdx].intra_pred[dirMode].</summary>
-    public static void IntraPred(int sizeIdx, int dirMode, byte* dst, long dstStride, byte* srcPix, int bFilter)
+    public static void IntraPred(int sizeIdx, int dirMode, pixel* dst, long dstStride, pixel* srcPix, int bFilter)
     {
         int width = 4 << sizeIdx;
         if (dirMode == PLANAR_IDX)
@@ -1246,13 +1262,13 @@ internal static unsafe class X265Primitives
     }
 
     /// <summary>all_angs_pred_c: modes 2..34, horizontal modes stored transposed.</summary>
-    public static void AllAngsPred(int log2Size, byte* dest, byte* refPix, byte* filtPix, int bLuma)
+    public static void AllAngsPred(int log2Size, pixel* dest, pixel* refPix, pixel* filtPix, int bLuma)
     {
         int size = 1 << log2Size;
         for (int mode = 2; mode <= 34; mode++)
         {
-            byte* srcPix = (X265Tables.IntraFilterFlags[mode] & size) != 0 ? filtPix : refPix;
-            byte* outp = dest + ((mode - 2) << (log2Size * 2));
+            pixel* srcPix = (X265Tables.IntraFilterFlags[mode] & size) != 0 ? filtPix : refPix;
+            pixel* outp = dest + ((mode - 2) << (log2Size * 2));
             IntraPredAng(size, outp, size, srcPix, mode, bLuma);
             if (mode < 18)
             {
@@ -1260,7 +1276,7 @@ internal static unsafe class X265Primitives
                 {
                     for (int l = k + 1; l < size; l++)
                     {
-                        byte tmp = outp[(k * size) + l];
+                        pixel tmp = outp[(k * size) + l];
                         outp[(k * size) + l] = outp[(l * size) + k];
                         outp[(l * size) + k] = tmp;
                     }

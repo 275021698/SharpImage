@@ -2,9 +2,19 @@
 // x265_param_default_preset("slow", "ssim"), x265_param_apply_profile("mainstillpicture") and libheif 1.23's
 // overrides), common/slice.h (VPS, SPS, PPS, Slice), common/framedata.h (FrameData) and SAO parameters.
 using System;
-using static SharpImage.Formats.Hevc.X265.X265Const;
 
+#if HIGH_BIT_DEPTH
+namespace SharpImage.Formats.Hevc.X265.Hbd;
+#else
 namespace SharpImage.Formats.Hevc.X265;
+#endif
+
+using static X265Const;
+#if HIGH_BIT_DEPTH
+using pixel = ushort;
+#else
+using pixel = byte;
+#endif
 
 /// <summary>The x265_param fields the intra path reads.</summary>
 internal sealed class X265Param

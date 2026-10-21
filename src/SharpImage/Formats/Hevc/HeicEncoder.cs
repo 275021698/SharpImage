@@ -79,74 +79,167 @@ internal static class HeicEncoder
         }
 
         if (chromaFormat is not (0 or 1)) throw new ArgumentOutOfRangeException(nameof(chromaFormat));
+        return EncodePlanes(y, cb, cr, chromaFormat == 0, alpha, width, height, 8, colorDescription, quality, constantQp,
+            colorPrimaries, transferCharacteristics, icc, exif, xmp, orientation, Encode8);
 
+        static List<(int Type, byte[] Payload)> Encode8(byte[] y, byte[]? u, byte[]? v, int pw, int ph, PictureSettings s)
+            => X265Encoder.EncodePicture(y, u, v, pw, ph, pw, pw >> 1, new X265EncodeSettings
+            {
+                Quality = s.Quality, ConstantQp = s.ConstantQp, CtuSize = s.CtuSize, Monochrome = s.Monochrome,
+                WriteColorDescription = s.ColorDescription, ColorPrimaries = s.ColorPrimaries,
+                TransferCharacteristics = s.TransferCharacteristics, MatrixCoefficients = 6,
+            });
+    }
+
+    /// <summary>
+    /// Encodes 16-bit samples (row-major; channels 1 = gray, 2 = gray + alpha, 3 = RGB, 4 = RGBA) at 10 bits, as
+    /// heif-enc encodes a 16-bit PNG: the samples reduced to 10 bits (<c>&gt;&gt; 6</c>), RGB through libheif's
+    /// Op_RRGGBBxx_HDR_to_YCbCr420, x265's 10-bit (HIGH_BIT_DEPTH) build with the main10-intra profile.
+    /// </summary>
+    public static byte[] Encode10(ReadOnlySpan<ushort> pixels, int width, int height, int channels, int quality, int? constantQp,
+        int colorPrimaries = 1, int transferCharacteristics = 13, byte[]? icc = null, byte[]? exif = null, byte[]? xmp = null,
+        int orientation = 1)
+    {
+        bool gray = channels <= 2;
+        bool hasAlpha = channels is 2 or 4;
+        ushort[] y;
+        ushort[]? cb = null, cr = null, alpha = null;
+        if (gray)
+        {
+            y = new ushort[width * height];
+            for (int i = 0; i < y.Length; i++) y[i] = (ushort)(pixels[i * channels] >> 6);
+        }
+        else
+        {
+            (y, cb, cr) = RgbToYCbCr420Hdr(pixels, width, height, channels);
+        }
+
+        if (hasAlpha)
+        {
+            alpha = new ushort[width * height];
+            for (int i = 0; i < alpha.Length; i++) alpha[i] = (ushort)(pixels[(i * channels) + channels - 1] >> 6);
+        }
+
+        return EncodePlanes(y, cb, cr, gray, alpha, width, height, 10, colorDescription: !gray, quality, constantQp,
+            colorPrimaries, transferCharacteristics, icc, exif, xmp, orientation, Encode10Bit);
+
+        static List<(int Type, byte[] Payload)> Encode10Bit(ushort[] y, ushort[]? u, ushort[]? v, int pw, int ph, PictureSettings s)
+            => X265.Hbd.X265Encoder.EncodePicture(y, u, v, pw, ph, pw, pw >> 1, new X265.Hbd.X265EncodeSettings
+            {
+                Quality = s.Quality, ConstantQp = s.ConstantQp, CtuSize = s.CtuSize, Monochrome = s.Monochrome,
+                WriteColorDescription = s.ColorDescription, ColorPrimaries = s.ColorPrimaries,
+                TransferCharacteristics = s.TransferCharacteristics, MatrixCoefficients = 6,
+            });
+    }
+
+    // What libheif's x265 plugin sets per picture.
+    private readonly record struct PictureSettings(int Quality, int? ConstantQp, int CtuSize, bool Monochrome, bool ColorDescription,
+        int ColorPrimaries, int TransferCharacteristics);
+
+    // The colour item (4:0:0 / 4:2:0 planes) and the alpha item through x265 as libheif's plugin drives it, then the container.
+    private static byte[] EncodePlanes<T>(T[] y, T[]? cb, T[]? cr, bool mono, T[]? alpha, int width, int height, int bitDepth,
+        bool colorDescription, int quality, int? constantQp, int colorPrimaries, int transferCharacteristics, byte[]? icc,
+        byte[]? exif, byte[]? xmp, int orientation, Func<T[], T[]?, T[]?, int, int, PictureSettings, List<(int Type, byte[] Payload)>> encode)
+    {
         // libheif's x265 plugin: the picture is the rounded size (even, at least 64), edge-replicated, and the CTU size
         // halves from 64 while the image is smaller than it
         int pw = RoundedSize(width), ph = RoundedSize(height);
         int ctu = 64;
         while (ctu > 16 && (width < ctu || height < ctu)) ctu >>= 1;
 
-        var settings = new X265EncodeSettings
-        {
-            Quality = quality,
-            ConstantQp = constantQp,
-            CtuSize = ctu,
-            Monochrome = chromaFormat == 0,
-            WriteColorDescription = colorDescription,
-            ColorPrimaries = colorPrimaries,
-            TransferCharacteristics = transferCharacteristics,
-            MatrixCoefficients = 6,
-        };
-
-        byte[] py = Pad(y, width, height, pw, ph);
+        var settings = new PictureSettings(quality, constantQp, ctu, mono, colorDescription, colorPrimaries, transferCharacteristics);
+        T[] py = Pad(y, width, height, pw, ph);
         List<(int Type, byte[] Payload)> colorNals;
-        if (chromaFormat == 0)
+        if (mono)
         {
-            colorNals = X265Encoder.EncodePicture(py, default, default, pw, ph, pw, 0, settings);
+            colorNals = encode(py, null, null, pw, ph, settings);
         }
         else
         {
             int cw = (width + 1) >> 1, chh = (height + 1) >> 1;
-            colorNals = X265Encoder.EncodePicture(py, Pad(cb!, cw, chh, pw >> 1, ph >> 1), Pad(cr!, cw, chh, pw >> 1, ph >> 1),
-                pw, ph, pw, pw >> 1, settings);
+            colorNals = encode(py, Pad(cb!, cw, chh, pw >> 1, ph >> 1), Pad(cr!, cw, chh, pw >> 1, ph >> 1), pw, ph, settings);
         }
 
         List<(int Type, byte[] Payload)>? alphaNals = null;
         if (alpha != null)
         {
-            var alphaSettings = new X265EncodeSettings
-            {
-                Quality = quality,
-                ConstantQp = constantQp,
-                CtuSize = ctu,
-                Monochrome = true,
-                WriteColorDescription = false,
-            };
-            alphaNals = X265Encoder.EncodePicture(Pad(alpha, width, height, pw, ph), default, default, pw, ph, pw, 0, alphaSettings);
+            alphaNals = encode(Pad(alpha, width, height, pw, ph), null, null, pw, ph,
+                settings with { Monochrome = true, ColorDescription = false, ColorPrimaries = 1, TransferCharacteristics = 13 });
         }
 
         // MIAF 7.3.6.7 (without Amd2): a YCbCr image whose size is not a multiple of the chroma subsampling is not MIAF
-        bool miaf = chromaFormat != 1 || ((width & 1) == 0 && (height & 1) == 0);
-        return BuildHeif(width, height, chromaFormat == 0, miaf, colorNals, alphaNals, icc, colorPrimaries, transferCharacteristics,
+        bool miaf = mono || ((width & 1) == 0 && (height & 1) == 0);
+        return BuildHeif(width, height, mono, bitDepth, miaf, colorNals, alphaNals, icc, colorPrimaries, transferCharacteristics,
             exif, xmp, orientation);
     }
 
     private static int RoundedSize(int s) => Math.Max((s + 1) & ~1, 64);
 
     // A tightly packed w x h plane, edge-replicated to pw x ph.
-    private static byte[] Pad(byte[] src, int w, int h, int pw, int ph)
+    private static T[] Pad<T>(T[] src, int w, int h, int pw, int ph)
     {
-        var p = new byte[pw * ph];
+        var p = new T[pw * ph];
         for (int r = 0; r < h; r++)
         {
             int o = r * pw;
             Array.Copy(src, r * w, p, o, w);
-            byte last = p[o + w - 1];
+            T last = p[o + w - 1];
             for (int x = w; x < pw; x++) p[o + x] = last;
         }
 
         for (int r = h; r < ph; r++) Array.Copy(p, (h - 1) * pw, p, r * pw, pw);
         return p;
+    }
+
+    /// <summary>
+    /// libheif's Op_RRGGBBxx_HDR_to_YCbCr420 (BT.601 matrix, full range, float coefficients): luma per pixel, chroma from
+    /// the float mean of each 2x2 block (edge samples repeated at odd edges), of the 10-bit samples.
+    /// </summary>
+    private static (ushort[] Y, ushort[] Cb, ushort[] Cr) RgbToYCbCr420Hdr(ReadOnlySpan<ushort> rgb, int w, int h, int channels)
+    {
+        const float kr = 0.299f, kb = 0.114f;
+        float kg = 1f - kr - kb;
+        float c10 = -kr / (1f - kb) / 2f, c11 = -kg / (1f - kb) / 2f, c12 = 0.5f;
+        float c20 = 0.5f, c21 = -kg / (1f - kr) / 2f, c22 = -kb / (1f - kr) / 2f;
+        const int fullRange = 1023;
+        const float halfRange = 512;
+
+        var y = new ushort[w * h];
+        for (int i = 0; i < y.Length; i++)
+        {
+            float r = rgb[i * channels] >> 6, g = rgb[(i * channels) + 1] >> 6, b = rgb[(i * channels) + 2] >> 6;
+            y[i] = ClipU16((r * kr) + (g * kg) + (b * kb), fullRange);
+        }
+
+        int cw = (w + 1) / 2, chh = (h + 1) / 2;
+        var cb = new ushort[cw * chh];
+        var cr = new ushort[cw * chh];
+        for (int yy = 0; yy < h; yy += 2)
+        {
+            int y2 = yy + 1 < h ? yy + 1 : yy;
+            for (int x = 0; x < w; x += 2)
+            {
+                int x2 = x + 1 < w ? x + 1 : x;
+                int p00 = ((yy * w) + x) * channels, p01 = ((yy * w) + x2) * channels;
+                int p10 = ((y2 * w) + x) * channels, p11 = ((y2 * w) + x2) * channels;
+                float r = rgb[p00] >> 6, g = rgb[p00 + 1] >> 6, b = rgb[p00 + 2] >> 6;
+                r += rgb[p01] >> 6; g += rgb[p01 + 1] >> 6; b += rgb[p01 + 2] >> 6;
+                r += rgb[p10] >> 6; g += rgb[p10 + 1] >> 6; b += rgb[p10 + 2] >> 6;
+                r += rgb[p11] >> 6; g += rgb[p11 + 1] >> 6; b += rgb[p11 + 2] >> 6;
+                r *= 0.25f; g *= 0.25f; b *= 0.25f;
+                cb[((yy / 2) * cw) + (x / 2)] = ClipU16(halfRange + ((r * c10) + (g * c11) + (b * c12)), fullRange);
+                cr[((yy / 2) * cw) + (x / 2)] = ClipU16(halfRange + ((r * c20) + (g * c21) + (b * c22)), fullRange);
+            }
+        }
+
+        return (y, cb, cr);
+    }
+
+    // clip_f_u16: (int32_t)(v + 0.5f), clipped to 0..max
+    private static ushort ClipU16(float v, int max)
+    {
+        int x = (int)(v + 0.5f);
+        return (ushort)(x < 0 ? 0 : x > max ? max : x);
     }
 
     /// <summary>
@@ -333,7 +426,7 @@ internal static class HeicEncoder
         public readonly List<(bool Essential, int Index)> Props = new();
     }
 
-    private static byte[] BuildHeif(int width, int height, bool gray, bool miaf, List<(int Type, byte[] Payload)> colorNals,
+    private static byte[] BuildHeif(int width, int height, bool gray, int bitDepth, bool miaf, List<(int Type, byte[] Payload)> colorNals,
         List<(int Type, byte[] Payload)>? alphaNals, byte[]? icc, int colorPrimaries, int transferCharacteristics,
         byte[]? exif, byte[]? xmp, int orientation)
     {
@@ -385,7 +478,8 @@ internal static class HeicEncoder
                     U32((uint)-(codedW - width)), U32(2), U32((uint)-(codedH - height)), U32(2))))));
             }
 
-            item.Props.Add((false, FindOrAppend(FullBox("pixi", 0, 0, mono ? new byte[] { 1, 8 } : new byte[] { 3, 8, 8, 8 }))));
+            byte bd = (byte)bitDepth;
+            item.Props.Add((false, FindOrAppend(FullBox("pixi", 0, 0, mono ? new byte[] { 1, bd } : new byte[] { 3, bd, bd, bd }))));
             if (irot != null) item.Props.Add((true, FindOrAppend(Box("irot", new[] { (byte)irot.Value }))));
             if (imir != null) item.Props.Add((true, FindOrAppend(Box("imir", new[] { (byte)imir.Value }))));
             return item;

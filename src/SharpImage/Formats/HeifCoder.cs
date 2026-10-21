@@ -960,11 +960,8 @@ public static partial class HeifCoder
         }
         else
         {
-            int matrixCoeffs; bool fullRange;
-            if (nclx is { } hn) { matrixCoeffs = hn.Mc; fullRange = hn.Full; }
-            else ParseNclxColour(c.Data, out matrixCoeffs, out fullRange);
             byte[] hvcC = c.Property(id, "hvcC") is { } hp ? c.Data.AsSpan(hp.Off, hp.Len).ToArray() : FindConfigBox(c.Data, "hvcC");
-            DecodeHevcIntraFrame(coded, f, hvcC, matrixCoeffs, fullRange);
+            DecodeHevcIntraFrame(coded, f, hvcC, nclx);
         }
         return f;
     }
@@ -1063,27 +1060,6 @@ public static partial class HeifCoder
         return [];
     }
 
-    // Reads the colour matrix coefficients + full-range flag from the ISOBMFF 'colr'/'nclx'
-    // box so YUV→RGB uses the right matrix. Defaults to BT.601 full range when absent.
-    private static void ParseNclxColour(byte[] data, out int matrixCoeffs, out bool fullRange)
-    {
-        // Defaults when no colour box is present: BT.709, limited (video) range — the
-        // convention decoders assume for HEVC/HEIC with unspecified colour.
-        matrixCoeffs = 1;
-        fullRange = false;
-        for (int i = 0; i + 19 < data.Length; i++)
-        {
-            if (data[i] == 'c' && data[i + 1] == 'o' && data[i + 2] == 'l' && data[i + 3] == 'r'
-                && data[i + 4] == 'n' && data[i + 5] == 'c' && data[i + 6] == 'l' && data[i + 7] == 'x')
-            {
-                // colour_primaries(2) transfer(2) matrix(2) full_range_flag(1 bit, high)
-                matrixCoeffs = (data[i + 12] << 8) | data[i + 13];
-                fullRange = (data[i + 14] & 0x80) != 0;
-                return;
-            }
-        }
-    }
-
     public static byte[] Encode(ImageFrame image, HeifContainerType containerType = HeifContainerType.Avif)
         => containerType == HeifContainerType.Avif ? Encode(image, containerType, 20) : EncodeHeic(image);
 
@@ -1115,8 +1091,10 @@ public static partial class HeifCoder
         int ch = image.NumberOfChannels;
         int colors = ch - (image.HasAlpha ? 1 : 0);
         bool gray = IsGreyImage(image);   // gray content is coded as a monochrome item, as heif-enc codes a gray source
+        // a source deeper than 8 bits is coded at 10 (heif-enc's default for 16-bit PNGs), else at 8
+        bool deep = !SourcePlanes.TryGetValue(image, out _) && AutoBitDepth(image) != 8;
         int outCh = (gray ? 1 : 3) + (image.HasAlpha ? 1 : 0);
-        var px = new byte[w * h * outCh];
+        var px = new ushort[w * h * outCh];
         for (int y = 0; y < h; y++)
         {
             ReadOnlySpan<ushort> row = image.GetPixelRow(y);
@@ -1124,14 +1102,14 @@ public static partial class HeifCoder
             {
                 int o = x * ch;
                 int d = ((y * w) + x) * outCh;
-                px[d] = Quantum.ScaleToByte(row[o]);
+                px[d] = row[o];
                 if (!gray)
                 {
-                    px[d + 1] = Quantum.ScaleToByte(colors > 1 ? row[o + 1] : row[o]);
-                    px[d + 2] = Quantum.ScaleToByte(colors > 2 ? row[o + 2] : row[o]);
+                    px[d + 1] = colors > 1 ? row[o + 1] : row[o];
+                    px[d + 2] = colors > 2 ? row[o + 2] : row[o];
                 }
 
-                if (image.HasAlpha) px[d + outCh - 1] = Quantum.ScaleToByte(row[o + ch - 1]);
+                if (image.HasAlpha) px[d + outCh - 1] = row[o + ch - 1];
             }
         }
 
@@ -1143,8 +1121,11 @@ public static partial class HeifCoder
         byte[]? exif = image.Metadata.ExifProfile is { } e ? SharpImage.Metadata.ExifParser.SerializeForPngExif(e) : null;
         byte[]? xmp = image.Metadata.Xmp is { } xmpText ? System.Text.Encoding.UTF8.GetBytes(xmpText) : null;
         int orientation = (int)image.Orientation is >= 1 and <= 8 ? (int)image.Orientation : 1;
-        return Hevc.HeicEncoder.Encode(px, w, h, outCh, Math.Clamp(options.Quality, 0, 100), options.Qp, cp, tc, icc, exif, xmp,
-            orientation);
+        int q = Math.Clamp(options.Quality, 0, 100);
+        if (deep) return Hevc.HeicEncoder.Encode10(px, w, h, outCh, q, options.Qp, cp, tc, icc, exif, xmp, orientation);
+        var px8 = new byte[px.Length];
+        for (int i = 0; i < px.Length; i++) px8[i] = Quantum.ScaleToByte(px[i]);
+        return Hevc.HeicEncoder.Encode(px8, w, h, outCh, q, options.Qp, cp, tc, icc, exif, xmp, orientation);
     }
 
     // AVIF encode via the from-scratch AV1 intra encoder. Current scope: grayscale, up to one 64x64 superblock.
@@ -2912,71 +2893,6 @@ public static partial class HeifCoder
             decoder.Monochrome, cicp.Mc, cicp.Full, cicp.Cp, is444 ? 0 : 1, (is444 || is422) ? 0 : 1, premAlpha);
     }
 
-    // Converts a decoded 8/10/12-bit planar YUV 4:2:0 frame to RGB, honouring the colour
-    // matrix (BT.709 vs BT.601) and range (full vs limited) signalled by the container.
-    // Shared by the AVIF (AV1) and HEIC (HEVC) paths.
-    private static void ConvertYuvToRgb(ReadOnlySpan<byte> y0, ReadOnlySpan<byte> u0, ReadOnlySpan<byte> v0, int yStride, int uStride, int vStride, ImageFrame frame, int w, int h, int channels, bool tenBit, int shift, bool bt709, bool fullRange, int ssHor = 1, int ssVer = 1)
-    {
-        int Sample(ReadOnlySpan<byte> plane, int stride, int x, int y)
-        {
-            if (!tenBit)
-            {
-                return plane[y * stride + x];
-            }
-
-            int idx = (y * stride + x) * 2;
-            int v = plane[idx] | (plane[idx + 1] << 8);
-            return v >> shift;
-        }
-
-        for (int y = 0; y < h; y++)
-        {
-            var row = frame.GetPixelRowForWrite(y);
-            int cy = y >> ssVer;
-            for (int x = 0; x < w; x++)
-            {
-                int cx = x >> ssHor;
-                int yv = Sample(y0, yStride, x, y);
-                int d = Sample(u0, uStride, cx, cy) - 128;
-                int e = Sample(v0, vStride, cx, cy) - 128;
-                byte r, g, b;
-                if (fullRange)
-                {
-                    // Full range: no Y offset, 16.16 fixed-point coefficients.
-                    (int cr, int cgU, int cgV, int cb) = bt709
-                        ? (103206, 12276, 30679, 121609)   // BT.709
-                        : (91881, 22554, 46802, 116130);   // BT.601 (JPEG)
-                    r = ClampByte(yv + ((cr * e + 32768) >> 16));
-                    g = ClampByte(yv - ((cgU * d + cgV * e + 32768) >> 16));
-                    b = ClampByte(yv + ((cb * d + 32768) >> 16));
-                }
-                else
-                {
-                    // Limited (video) range: Y scaled by 1.164 from 16, 8.8 fixed-point.
-                    int c = 298 * (yv - 16);
-                    (int cr, int cgU, int cgV, int cb) = bt709
-                        ? (459, 55, 136, 541)              // BT.709
-                        : (409, 100, 208, 516);            // BT.601
-                    r = ClampByte((c + cr * e + 128) >> 8);
-                    g = ClampByte((c - cgU * d - cgV * e + 128) >> 8);
-                    b = ClampByte((c + cb * d + 128) >> 8);
-                }
-
-                int off = x * channels;
-                row[off] = Quantum.ScaleFromByte(r);
-                if (channels > 1)
-                {
-                    row[off + 1] = Quantum.ScaleFromByte(g);
-                }
-
-                if (channels > 2)
-                {
-                    row[off + 2] = Quantum.ScaleFromByte(b);
-                }
-            }
-        }
-    }
-
     private static byte ClampByte(int v) => (byte)(v < 0 ? 0 : v > 255 ? 255 : v);
 
     // libavif's matrix table (colr.c matrixCoefficientsTables): (kr, kb) per CICP matrix_coefficients. Anything else
@@ -3463,9 +3379,10 @@ public static partial class HeifCoder
             : throw new InvalidDataException("HEVC alpha item without hvcC.");
         var decoder = new Hevc.HevcDecoder();
         decoder.Initialize(hvcC);
-        using var yuv = decoder.Decode(codedData, 0, isKeyframe: true)
+        using var yuv = decoder.DecodeStill(codedData)
             ?? throw new InvalidDataException("HEVC alpha decode produced no frame.");
-        int shift = yuv.Format == Hevc.PixelFormat.Yuv420P12 ? 4 : yuv.Format == Hevc.PixelFormat.Yuv420P10 ? 2 : 0;
+        // deeper samples scaled to 16 bits as heif-dec writes them (v << s | v >> (16 - s), s = 16 - depth)
+        int bpp = decoder.DiagActiveSps?.BitDepthLuma ?? 8, outShift = 16 - bpp;
         if (!frame.HasAlpha) frame.SetAlpha(true);
         int nch = frame.NumberOfChannels, aOff = nch - 1;
         ReadOnlySpan<byte> yp = yuv.YPlane.Span;
@@ -3475,38 +3392,35 @@ public static partial class HeifCoder
             for (int x = 0; x < w; x++)
             {
                 int v;
-                if (shift == 0)
+                if (bpp == 8)
                 {
                     v = yp[(y * yuv.YStride) + x] * 257;
                 }
                 else
                 {
-                    int o = ((y * yuv.YStride) + x) * 2;
-                    int s16 = yp[o] | (yp[o + 1] << 8);
-                    v = (int)(0.5 + s16 * 65535.0 / ((1 << (8 + shift)) - 1));
+                    int o = (y * yuv.YStride) + (x * 2);
+                    int s = yp[o] | (yp[o + 1] << 8);
+                    v = (s << outShift) | (s >> (16 - outShift));
                 }
                 row[(x * nch) + aOff] = (ushort)v;
             }
         }
     }
 
-    private static void DecodeHevcIntraFrame(ReadOnlySpan<byte> codedData, ImageFrame frame, byte[] hvcC, int matrixCoeffs, bool fullRange)
+    private static void DecodeHevcIntraFrame(ReadOnlySpan<byte> codedData, ImageFrame frame, byte[] hvcC, (int Cp, int Tc, int Mc, bool Full)? colr)
     {
         // Decode the HEVC keyframe with the vendored HEVC decoder. HEIC keeps the parameter
         // sets (VPS/SPS/PPS) in the hvcC configuration box and the coded slice NALs in the
         // item's data, so configure from hvcC first, then decode the slice.
         var decoder = new Hevc.HevcDecoder();
         decoder.Initialize(hvcC);
-        using var yuv = decoder.Decode(codedData, 0, isKeyframe: true)
+        using var yuv = decoder.DecodeStill(codedData)
             ?? throw new InvalidDataException("HEVC decode produced no frame.");
 
-        int w = (int)frame.Columns;
-        int h = (int)frame.Rows;
-        int channels = frame.NumberOfChannels;
-        bool tenBit = yuv.Format is Hevc.PixelFormat.Yuv420P10 or Hevc.PixelFormat.Yuv420P12;
-        int shift = tenBit ? (yuv.Format == Hevc.PixelFormat.Yuv420P12 ? 4 : 2) : 0;
-        ConvertYuvToRgb(yuv.YPlane.Span, yuv.UPlane.Span, yuv.VPlane.Span, yuv.YStride, yuv.UStride, yuv.VStride,
-            frame, w, h, channels, tenBit, shift, matrixCoeffs == 1, fullRange);
+        var sps = decoder.DiagActiveSps ?? throw new InvalidDataException("HEVC stream without an SPS.");
+        var nclx = HevcNclx(colr, sps);
+        frame.Metadata.Cicp ??= new SharpImage.Metadata.CicpInfo(nclx.Cp, nclx.Tc, nclx.Mc, nclx.Full);
+        ConvertHevcPicture(yuv, sps, nclx, frame);
     }
 
     #endregion

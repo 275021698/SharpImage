@@ -131,14 +131,14 @@ public static class HevcNalParser
 
         while (position + nalLengthSize <= data.Length)
         {
-            // Read NAL length
-            int nalLength = nalLengthSize switch
+            // Read NAL length (unsigned: a length beyond the data ends the parse)
+            long nalLength = nalLengthSize switch
             {
                 1 => data[position],
                 2 => (data[position] << 8) | data[position + 1],
                 3 => (data[position] << 16) | (data[position + 1] << 8) | data[position + 2],
-                4 => (data[position] << 24) | (data[position + 1] << 16) | 
-                     (data[position + 2] << 8) | data[position + 3],
+                4 => ((uint)data[position] << 24) | ((uint)data[position + 1] << 16) |
+                     ((uint)data[position + 2] << 8) | data[position + 3],
                 _ => throw new ArgumentException("NAL length size must be 1-4", nameof(nalLengthSize))
             };
 
@@ -147,13 +147,13 @@ public static class HevcNalParser
             if (position + nalLength > data.Length)
                 break;
 
-            var nalData = data.Slice(position, nalLength);
+            var nalData = data.Slice(position, (int)nalLength);
             if (nalData.Length >= HevcNalHeaderSize)
             {
                 nalUnits.Add(ParseNalHeader(nalData, position));
             }
 
-            position += nalLength;
+            position += (int)nalLength;
         }
 
         return nalUnits.ToArray();

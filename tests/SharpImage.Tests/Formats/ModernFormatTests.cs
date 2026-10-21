@@ -234,14 +234,14 @@ public class ModernFormatTests
     }
 
     // ======================= HEIC =======================
-    // HEIC decoding is real (vendored HEVC decoder). Reference pixels captured from the
-    // decoder's own output on TestAssets/hevc_sample.heic (a small self-built HEIC whose
-    // HEVC stream ffmpeg agrees with to maxdiff 33 — i.e. genuinely decoded, not garbage).
+    // HEIC decoding is real (vendored HEVC decoder). Reference pixels of TestAssets/hevc_sample.heic (a small
+    // self-built HEIC without hvcC, so libheif cannot open it), converted by libheif's rules: no colr box, so the colour
+    // is what the HEVC VUI signals (libde265's defaults where absent).
     private static readonly (int Y, int X, int R, int G, int B)[] HeicReference =
     [
-        (0, 0, 0, 10, 133), (0, 95, 255, 32, 124), (63, 0, 0, 220, 127), (63, 95, 255, 245, 132),
-        (18, 30, 238, 57, 30), (46, 60, 14, 91, 217), (32, 48, 123, 128, 129),
-        (5, 5, 15, 27, 136), (50, 10, 12, 180, 128), (25, 80, 226, 113, 130),
+        (0, 0, 0, 3, 128), (0, 95, 247, 1, 123), (63, 0, 2, 253, 129), (63, 95, 255, 253, 138),
+        (18, 30, 223, 39, 33), (46, 60, 22, 91, 212), (32, 48, 124, 129, 129),
+        (5, 5, 17, 22, 132), (50, 10, 26, 203, 129), (25, 80, 218, 101, 131),
     ];
 
     [Test]

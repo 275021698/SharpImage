@@ -2,9 +2,19 @@
 // operations, neighbour derivation, MPM, QP prediction and the TU entropy-coding parameters. The per-part arrays
 // keep x265's contiguous order, which initCTU / initSubCU memsets rely on.
 using System;
-using static SharpImage.Formats.Hevc.X265.X265Const;
 
+#if HIGH_BIT_DEPTH
+namespace SharpImage.Formats.Hevc.X265.Hbd;
+#else
 namespace SharpImage.Formats.Hevc.X265;
+#endif
+
+using static X265Const;
+#if HIGH_BIT_DEPTH
+using sse_t = ulong;
+#else
+using sse_t = uint;
+#endif
 
 /// <summary>struct TUEntropyCodingParameters.</summary>
 internal unsafe struct TUEntropyCodingParameters
@@ -85,7 +95,7 @@ internal sealed unsafe class X265CuData
     public readonly byte*[] m_transformSkip = new byte*[3];
     public readonly byte*[] m_cbf = new byte*[3];
     public byte* m_chromaIntraDir;
-    public uint* m_distortion;
+    public sse_t* m_distortion;
     public readonly short*[] m_trCoeff = new short*[3];
     public readonly sbyte[] m_refTuDepth = new sbyte[21];
 
@@ -137,7 +147,7 @@ internal sealed unsafe class X265CuData
         }
 
         m_chromaIntraDir = charBuf;
-        m_distortion = arena.Alloc<uint>(n);
+        m_distortion = arena.Alloc<sse_t>(n);
         uint cuSize = maxCUSize >> (int)depth;
         uint sizeL = cuSize * cuSize;
         if (i400)
@@ -190,7 +200,7 @@ internal sealed unsafe class X265CuData
         m_cuAbove = (m_cuAddr >= widthInCU) && m_bFirstRowInSlice == 0 ? encData.GetPicCTU(m_cuAddr - widthInCU) : null;
         m_cuAboveLeft = (m_cuLeft != null && m_cuAbove != null) ? encData.GetPicCTU(m_cuAddr - widthInCU - 1) : null;
         m_cuAboveRight = (m_cuAbove != null && ((m_cuAddr % widthInCU) < (widthInCU - 1))) ? encData.GetPicCTU(m_cuAddr - widthInCU + 1) : null;
-        new Span<uint>(m_distortion, (int)n).Clear();
+        new Span<sse_t>(m_distortion, (int)n).Clear();
     }
 
     public void InitSubCU(X265CuData ctu, in CUGeom cuGeom, int qp)
@@ -222,7 +232,7 @@ internal sealed unsafe class X265CuData
 
         // the remaining CU data in one memset (m_predMode .. the last cbf array)
         new Span<byte>(m_predMode, (int)((ctu.m_chromaFormat == X265_CSP_I400 ? BytesPerPartition - 13 : BytesPerPartition - 9) * n)).Clear();
-        new Span<uint>(m_distortion, (int)n).Clear();
+        new Span<sse_t>(m_distortion, (int)n).Clear();
     }
 
     /// <summary>Copy the results of a sub-part (split) CU to the parent CU.</summary>
@@ -250,7 +260,7 @@ internal sealed unsafe class X265CuData
         PartCopy(m_tuDepth + offset, subCU.m_tuDepth, q);
         PartCopy(m_transformSkip[0] + offset, subCU.m_transformSkip[0], q);
         PartCopy(m_cbf[0] + offset, subCU.m_cbf[0], q);
-        Buffer.MemoryCopy(subCU.m_distortion, m_distortion + offset, childGeom.numPartitions * 4, childGeom.numPartitions * 4);
+        Buffer.MemoryCopy(subCU.m_distortion, m_distortion + offset, childGeom.numPartitions * sizeof(sse_t), childGeom.numPartitions * sizeof(sse_t));
 
         uint tmp = 1u << (int)((m_slice.m_param.maxLog2CUSize - childGeom.depth) * 2);
         uint tmp2 = subPartIdx * tmp;
@@ -302,7 +312,7 @@ internal sealed unsafe class X265CuData
         PartCopy(ctu.m_tuDepth + a, m_tuDepth, n);
         PartCopy(ctu.m_transformSkip[0] + a, m_transformSkip[0], n);
         PartCopy(ctu.m_cbf[0] + a, m_cbf[0], n);
-        Buffer.MemoryCopy(m_distortion, ctu.m_distortion + a, n * 4, n * 4);
+        Buffer.MemoryCopy(m_distortion, ctu.m_distortion + a, n * sizeof(sse_t), n * sizeof(sse_t));
 
         uint tmpY = 1u << (int)((m_slice.m_param.maxLog2CUSize - depth) * 2);
         uint tmpY2 = a << (LOG2_UNIT_SIZE * 2);

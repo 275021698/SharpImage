@@ -5,9 +5,19 @@
 // processed in the order x265's single-threaded wavefront produces (its output does not depend on threading).
 using System;
 using System.Collections.Generic;
-using static SharpImage.Formats.Hevc.X265.X265Const;
 
+#if HIGH_BIT_DEPTH
+namespace SharpImage.Formats.Hevc.X265.Hbd;
+#else
 namespace SharpImage.Formats.Hevc.X265;
+#endif
+
+using static X265Const;
+#if HIGH_BIT_DEPTH
+using pixel = ushort;
+#else
+using pixel = byte;
+#endif
 
 /// <summary>Settings of one x265 encode as libheif's x265 plugin makes them.</summary>
 internal sealed class X265EncodeSettings
@@ -42,7 +52,7 @@ internal static unsafe class X265Encoder
     /// Encodes one 8-bit picture (planes already padded by the caller to the size it passes, as libheif pads to
     /// even dimensions of at least 64) and returns the NAL units (VPS, SPS, PPS, slice) without start codes.
     /// </summary>
-    public static List<(int Type, byte[] Payload)> EncodePicture(ReadOnlySpan<byte> y, ReadOnlySpan<byte> u, ReadOnlySpan<byte> v,
+    public static List<(int Type, byte[] Payload)> EncodePicture(ReadOnlySpan<pixel> y, ReadOnlySpan<pixel> u, ReadOnlySpan<pixel> v,
         int width, int height, int strideY, int strideC, X265EncodeSettings s)
     {
         using var arena = new X265Arena();
@@ -350,9 +360,13 @@ internal static unsafe class X265Encoder
         ptl.lowerBitRateConstraintFlag = true;
         vps.maxTempSubLayers = 1;
 
-        if (p.internalCsp == X265_CSP_I420)
+        if (p.internalCsp == X265_CSP_I420 && X265_DEPTH <= 8)
         {
             ptl.profileIdc = ptl.onePictureOnlyConstraintFlag ? 3 : ptl.intraConstraintFlag ? 4 : 1;   // MAINSTILLPICTURE / MAINREXT / MAIN
+        }
+        else if (p.internalCsp == X265_CSP_I420 && X265_DEPTH <= 10)
+        {
+            ptl.profileIdc = ptl.intraConstraintFlag ? 4 : 2;   // MAINREXT (Main10 Intra; no 10-bit still picture profile) / MAIN10
         }
         else
         {
@@ -361,7 +375,11 @@ internal static unsafe class X265Encoder
 
         Array.Clear(ptl.profileCompatibilityFlag);
         ptl.profileCompatibilityFlag[ptl.profileIdc] = true;
-        if (ptl.profileIdc == 1)
+        if (ptl.profileIdc == 2 && X265_DEPTH == 8)
+        {
+            ptl.profileCompatibilityFlag[1] = true;
+        }
+        else if (ptl.profileIdc == 1)
         {
             ptl.profileCompatibilityFlag[2] = true;
         }
@@ -480,7 +498,7 @@ internal static unsafe class X265Encoder
         {
             for (int plane = 1; plane <= 2; plane++)
             {
-                byte* src = pic.m_picOrg[plane] + blockOffsetChroma;
+                pixel* src = pic.m_picOrg[plane] + blockOffsetChroma;
                 if (qgSize == 8)
                 {
                     var += AcEnergyVar(X265Primitives.PixelVar(src, cStride, 4), 4);

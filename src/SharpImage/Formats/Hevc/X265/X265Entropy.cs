@@ -3,9 +3,19 @@
 // Headers (VPS / SPS / PPS / slice header) are in X265Entropy.Headers.cs.
 using System;
 using System.Runtime.CompilerServices;
-using static SharpImage.Formats.Hevc.X265.X265Const;
 
+#if HIGH_BIT_DEPTH
+namespace SharpImage.Formats.Hevc.X265.Hbd;
+#else
 namespace SharpImage.Formats.Hevc.X265;
+#endif
+
+using static X265Const;
+#if HIGH_BIT_DEPTH
+using pixel = ushort;
+#else
+using pixel = byte;
+#endif
 
 /// <summary>struct EstBitsSbac (flattened).</summary>
 internal unsafe struct EstBitsSbac
