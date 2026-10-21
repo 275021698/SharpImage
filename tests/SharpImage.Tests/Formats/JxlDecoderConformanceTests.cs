@@ -110,8 +110,9 @@ public class JxlDecoderConformanceTests
     [MethodDataSource(nameof(RecompressCases))]
     public async Task ReconstructsOriginalJpeg_FromCjxlFile(string name)
     {
+        // name.eN.cjxl.jxl is the same JPEG at cjxl effort N.
         byte[] jxl = File.ReadAllBytes(Path.Combine(RecompressDir, name + ".cjxl.jxl"));
-        byte[] jpeg = File.ReadAllBytes(Path.Combine(RecompressDir, name + ".jpg"));
+        byte[] jpeg = File.ReadAllBytes(Path.Combine(RecompressDir, System.Text.RegularExpressions.Regex.Replace(name, @"\.e\d+$", "") + ".jpg"));
         byte[]? rebuilt = JxlCoder.ReconstructJpeg(jxl);
         await Assert.That(rebuilt).IsNotNull();
         await Assert.That(rebuilt!.AsSpan().SequenceEqual(jpeg)).IsTrue();
