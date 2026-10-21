@@ -114,6 +114,12 @@ public static class JxlCoder
     public static byte[] EncodeFromJpeg(byte[] jpeg) => Jxl.Lj.LjJpegTranscoder.Transcode(jpeg);
 
     /// <summary>
+    /// <see cref="EncodeFromJpeg(byte[])"/> at a cjxl effort level (1-10; 7 is cjxl's default): the output is
+    /// byte-identical to <c>cjxl -e effort</c>. Every level is lossless; higher levels search more for a smaller file.
+    /// </summary>
+    public static byte[] EncodeFromJpeg(byte[] jpeg, int effort) => Jxl.Lj.LjJpegTranscoder.Transcode(jpeg, effort);
+
+    /// <summary>
     /// Encodes an animated image sequence as a single multi-frame lossless JPEG XL codestream. Each frame
     /// carries its own duration (from <see cref="ImageFrame.Delay"/>, centiseconds); the metadata holds the
     /// loop count. A one-frame sequence produces an ordinary still image.

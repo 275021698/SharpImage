@@ -1,7 +1,7 @@
 // Lossless JPEG <-> JXL transcoding (JPEG recompression).
 //
 // Encode writes a standard JPEG XL file: libjxl's lossless JPEG recompression (the JPEG's DCT coefficients as a
-// VarDCT frame plus a jbrd box), byte-identical to cjxl 0.12 at its default effort, which djxl or any JPEG XL
+// VarDCT frame plus a jbrd box), byte-identical to cjxl 0.12 at the same effort, which djxl or any JPEG XL
 // decoder with reconstruction support turns back into the original JPEG byte for byte.
 //
 // Decode rebuilds the original JPEG from such a file, and also from SharpImage's earlier private container
@@ -15,22 +15,22 @@ using SharpImage.Image;
 
 namespace SharpImage.Formats;
 
-/// <summary>Speed vs compression presets for JPEG recompression. Every level is byte-exact; higher levels
-/// search more coding candidates for a smaller container at the cost of more CPU. <see cref="Balanced"/> is
-/// the recommended default; <see cref="Turbo"/> is a single pass at roughly libjxl's speed for a little size.</summary>
+/// <summary>Speed vs compression presets for JPEG recompression, as cjxl effort levels. Every level is lossless
+/// (the JPEG is rebuilt byte for byte); higher levels search more for a smaller file. <see cref="Balanced"/> is
+/// cjxl's default.</summary>
 public enum JpegRecompressionEffort
 {
-    /// <summary>Single pass — roughly libjxl's speed, a little larger than <see cref="Balanced"/>.</summary>
-    Turbo = Jxl.JxlEncoder.JpegEffortTurbo,
+    /// <summary>cjxl -e 1: fastest.</summary>
+    Turbo = 1,
 
-    /// <summary>A quick best-of; between <see cref="Turbo"/> and <see cref="Balanced"/>.</summary>
-    Fast = Jxl.JxlEncoder.JpegEffortFast,
+    /// <summary>cjxl -e 3.</summary>
+    Fast = 3,
 
-    /// <summary>The recommended default: full best-of over predictors, scan orders and LZ77.</summary>
-    Balanced = Jxl.JxlEncoder.JpegEffortDefault,
+    /// <summary>cjxl -e 7, its default.</summary>
+    Balanced = 7,
 
-    /// <summary>Exhaustive: also tries the weighted-DC predictor, longer LZ77 and prefix codes.</summary>
-    Maximum = Jxl.JxlEncoder.JpegEffortMax,
+    /// <summary>cjxl -e 9: learned trees for DC and chroma-from-luma, optimal LZ77, best clustering.</summary>
+    Maximum = 9,
 }
 
 public static class JpegXlLossless
@@ -41,27 +41,27 @@ public static class JpegXlLossless
     public static bool CanDecode(ReadOnlySpan<byte> data) =>
         data.Length >= 4 && BinaryPrimitives.ReadUInt32BigEndian(data) == Magic;
 
-    /// <summary>Effort presets (speed vs compression) as raw levels; prefer <see cref="JpegRecompressionEffort"/>.</summary>
-    public const int EffortTurbo = Jxl.JxlEncoder.JpegEffortTurbo;
-    public const int EffortFast = Jxl.JxlEncoder.JpegEffortFast;
-    public const int EffortDefault = Jxl.JxlEncoder.JpegEffortDefault;
-    public const int EffortMax = Jxl.JxlEncoder.JpegEffortMax;
+    /// <summary>Effort presets as cjxl effort levels; any level 1-10 may be passed.</summary>
+    public const int EffortTurbo = (int)JpegRecompressionEffort.Turbo;
+    public const int EffortFast = (int)JpegRecompressionEffort.Fast;
+    public const int EffortDefault = (int)JpegRecompressionEffort.Balanced;
+    public const int EffortMax = (int)JpegRecompressionEffort.Maximum;
 
     /// <summary>Losslessly recompresses a JPEG into a JPEG XL file (see <see cref="JxlCoder.EncodeFromJpeg"/>).</summary>
     public static byte[] Encode(byte[] jpeg) => Encode(jpeg, EffortDefault);
 
-    /// <summary>Losslessly recompresses a JPEG into a JPEG XL file. Every effort currently produces cjxl's default
-    /// (effort 7) output.</summary>
+    /// <summary>Losslessly recompresses a JPEG into a JPEG XL file at a preset effort.</summary>
     public static byte[] Encode(byte[] jpeg, JpegRecompressionEffort effort) => Encode(jpeg, (int)effort);
 
     /// <summary>Losslessly recompresses a JPEG into a standard JPEG XL file that reconstructs it byte for byte.
     /// Throws <see cref="NotSupportedException"/> for a JPEG libjxl cannot recompress (arithmetic coding, CMYK,
     /// 12-bit, unusual sampling) or one whose reconstruction would not be exact.</summary>
     /// <param name="jpeg">The source JPEG bytes.</param>
-    /// <param name="effort">Compression effort 1-9; every level currently produces cjxl's default output.</param>
+    /// <param name="effort">cjxl effort level 1-10 (7 is cjxl's default); the output is byte-identical to
+    /// <c>cjxl -e effort</c>.</param>
     public static byte[] Encode(byte[] jpeg, int effort)
     {
-        byte[] jxl = JxlCoder.EncodeFromJpeg(jpeg);
+        byte[] jxl = JxlCoder.EncodeFromJpeg(jpeg, effort);
 
         // Self-certify: only return a file that reconstructs the source JPEG byte-for-byte.
         byte[]? check = JxlCoder.ReconstructJpeg(jxl);

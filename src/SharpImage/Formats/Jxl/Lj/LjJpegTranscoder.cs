@@ -1,5 +1,5 @@
-// Lossless JPEG -> JPEG XL recompression, a line-by-line port of what cjxl 0.12 does by default for JPEG input
-// (lossless_jpeg=1, effort 7): the JPEG's own quantized DCT coefficients become a YCbCr VarDCT frame (enc_frame.cc
+// Lossless JPEG -> JPEG XL recompression, a line-by-line port of what cjxl 0.12 does for JPEG input
+// (lossless_jpeg=1, efforts 1-10, default 7): the JPEG's own quantized DCT coefficients become a YCbCr VarDCT frame (enc_frame.cc
 // ComputeJPEGTranscodingData), and a jbrd box carries everything else needed to rebuild the original file byte for
 // byte. Output is a standard JPEG XL container that libjxl decodes and `djxl x.jxl x.jpg` turns back into the input.
 using System;
@@ -10,7 +10,6 @@ namespace SharpImage.Formats.Jxl.Lj;
 
 internal static class LjJpegTranscoder
 {
-    private const int SpeedTier = LjSpeed.Squirrel;   // effort 7
     private const int BrotliEffort = 9;               // cjxl --brotli_effort default (jbrd and brob boxes)
     private const int NumOrders = 13;
     private const int NonZeroBuckets = 37;
@@ -63,12 +62,20 @@ internal static class LjJpegTranscoder
     public static bool IsJpeg(ReadOnlySpan<byte> data) => data.Length >= 2 && data[0] == 0xFF && data[1] == 0xD8;
 
     /// <summary>
-    /// Recompresses a JPEG into a JPEG XL container with JPEG reconstruction data. Throws
-    /// <see cref="NotSupportedException"/> for JPEGs libjxl cannot recompress (arithmetic coding, CMYK, 12-bit,
-    /// unusual sampling, corrupt streams); callers then encode the decoded pixels instead, as cjxl does.
+    /// Recompresses a JPEG into a JPEG XL container with JPEG reconstruction data, as cjxl -e <paramref name="effort"/>
+    /// (1-10; 7 is cjxl's default) does. Throws <see cref="NotSupportedException"/> for JPEGs libjxl cannot recompress
+    /// (arithmetic coding, CMYK, 12-bit, unusual sampling, corrupt streams); callers then encode the decoded pixels
+    /// instead, as cjxl does.
     /// </summary>
-    public static byte[] Transcode(byte[] jpegBytes)
+    public static byte[] Transcode(byte[] jpegBytes, int effort = 7)
     {
+        if (effort < 1 || effort > 10)
+        {
+            throw new ArgumentOutOfRangeException(nameof(effort), "JPEG XL effort must be 1-10.");
+        }
+
+        // SpeedTier = 10 - effort; EncodeFrame handles kLightning as kThunder.
+        int speedTier = Math.Min(10 - effort, LjSpeed.Thunder);
         LjProf.Mark("start");
         LjJpegData jpg;
         try
@@ -148,7 +155,7 @@ internal static class LjJpegTranscoder
         }
 
         LjProf.Mark("jbrd+header setup");
-        byte[] frame = EncodeFrame(jpg, fh, nbcomp == 1);
+        byte[] frame = EncodeFrame(jpg, fh, nbcomp == 1, speedTier);
 
         // ---- codestream headers ----
         var hw = new LjBitWriter();
@@ -449,7 +456,7 @@ internal static class LjJpegTranscoder
 
     private static int RoundAwayF(float v) => (int)MathF.Round(v, MidpointRounding.AwayFromZero);
 
-    private static byte[] EncodeFrame(LjJpegData jpg, LjFrameHeader fh, bool isGray)
+    private static byte[] EncodeFrame(LjJpegData jpg, LjFrameHeader fh, bool isGray, int speedTier)
     {
         LjChromaSubsampling cs = fh.ChromaSubsampling;
         var fd = new FrameDims(jpg.Width, jpg.Height, cs.MaxHShift, cs.MaxVShift);
@@ -761,7 +768,7 @@ internal static class LjJpegTranscoder
             streamImages.Add(new LjModularImage());
         }
 
-        var baseOptions = ModularBaseOptions(numStreams);
+        var baseOptions = ModularBaseOptions(numStreams, speedTier);
         var streamOptions = new List<LjModularOptions>(numStreams);
         for (int i = 0; i < numStreams; i++)
         {
@@ -797,7 +804,16 @@ internal static class LjJpegTranscoder
             so.MaxChanSize = 0xFFFFFF;
             so.Predictor = LjPredictor.Weighted;
             so.WpTreeMode = LjModularOptions.TreeMode.WpOnly;
-            so.Kind = LjModularOptions.TreeKind.WpFixedDc;
+            if (speedTier >= LjSpeed.Squirrel)
+            {
+                so.Kind = LjModularOptions.TreeKind.WpFixedDc;
+            }
+            else
+            {
+                so.Predictor = speedTier < LjSpeed.Kitten ? LjPredictor.Variable : LjPredictor.Best;
+                so.WpTreeMode = LjModularOptions.TreeMode.Default;
+                so.Kind = LjModularOptions.TreeKind.Learn;
+            }
             var dimg = LjModularImage.Create(rw, rh, 8, 3);
             foreach (int c in (int[])[1, 0, 2])
             {
@@ -848,6 +864,11 @@ internal static class LjJpegTranscoder
             }
 
             ao.Kind = LjModularOptions.TreeKind.JpegTranscodeAcMeta;
+            if (speedTier < LjSpeed.Squirrel)
+            {
+                // force_cfl_jpeg_recompression (on by default): learn a tree for the CfL field in slow modes.
+                ao.Kind = LjModularOptions.TreeKind.Learn;
+            }
             int crx0 = rx0 >> 3, cry0 = ry0 >> 3, crw = (rw + 7) >> 3, crh = (rh + 7) >> 3;
             var aimg = LjModularImage.Create(rw, rh, 8, 4);
             aimg.Channel[0] = new LjChannel(crw, crh, 3, 3);
@@ -871,14 +892,15 @@ internal static class LjJpegTranscoder
         // ---- coefficient orders (ComputeUsedOrders / ComputeCoeffOrder) ----
         int[] natural = NaturalOrder8x8(false);
         int[] naturalLut = NaturalOrder8x8(true);
+        // ComputeUsedOrders: only DCT8 (order 0); no reordering decisions in Falcon or faster.
         bool smallImage = fd.XsizeBlocks < 5 && fd.YsizeBlocks < 5;
-        uint currentUsedOrders = smallImage ? 0u : 1u;
+        uint currentUsedOrders = speedTier >= LjSpeed.Falcon || !smallImage ? 1u : 0u;
         var orders = new int[3][];
         {
             var numZeros = new long[3 * 64];
             if (currentUsedOrders != 0)
             {
-                double blockFraction = 0.5f;   // kSquirrel and only 8x8 DCTs
+                double blockFraction = speedTier >= LjSpeed.Squirrel ? 0.5f : 1.0f;   // only 8x8 DCTs
                 ulong threshold = (ulong)((ulong.MaxValue >> 32) * blockFraction);
                 ulong s0 = 0x94D049BB133111EBul, s1 = 0xBF58476D1CE4E5B9ul;
                 for (int g = 0; g < fd.NumGroups; g++)
@@ -1098,7 +1120,7 @@ internal static class LjJpegTranscoder
             else
             {
                 w.Write(1, 1);
-                var p = LjHistogramParams.ForModular(SpeedTier, false, false, false, false);
+                var p = LjHistogramParams.ForModular(speedTier, false, false, false, false);
                 var treeCode = new LjEntropyCode();
                 var tt = new List<List<LjToken>> { treeTokens };
                 LjAns.BuildAndEncodeHistograms(p, LjMaTree.NumTreeContexts, ref tt, treeCode, w);
@@ -1184,7 +1206,11 @@ internal static class LjJpegTranscoder
                 LjAns.WriteTokens(ordTokens[0], oc, 0, w);
             }
 
-            var hp = new LjHistogramParams(SpeedTier) { Lz77 = LjHistogramParams.Lz77Method.None };
+            var hp = new LjHistogramParams(speedTier);
+            if (speedTier > LjSpeed.Tortoise)
+            {
+                hp.Lz77 = LjHistogramParams.Lz77Method.None;
+            }
             acCode = new LjEntropyCode();
             LjAns.BuildAndEncodeHistograms(hp, bcm.NumAcContexts, ref acTokens, acCode, w);
         }
@@ -1268,26 +1294,37 @@ internal static class LjJpegTranscoder
         return Math.Min(token, 7u);
     }
 
-    // ModularFrameEncoder::Init for a VarDCT frame at effort 7 (cparams of a lossless JPEG transcode).
-    private static LjModularOptions ModularBaseOptions(int numStreams)
+    // ModularFrameEncoder::Init for a VarDCT frame (cparams of a lossless JPEG transcode: the modular part is
+    // lossless, not responsive, Gradient predictor, no previous-channel properties).
+    private static LjModularOptions ModularBaseOptions(int numStreams, int speedTier)
     {
         var o = new LjModularOptions
         {
             FastDecodeMultiplier = 1.0f,
-            SplittingHeuristicsNodeThreshold = 75 + (14 * SpeedTier),
-            MaxPropertyValues = 96,
+            SplittingHeuristicsNodeThreshold = 75 + (14 * speedTier),
             NbRepeats = 0.5f,
             Predictor = LjPredictor.Gradient,
             MaxChanSize = GroupDim,
             GroupDim = GroupDim,
         };
         var propOrder = new List<uint> { 0, 1, 15, 9, 10, 11, 12, 13, 14, 2, 3, 4, 5, 6, 7, 8 };
-        if (numStreams < 30)
+        if (numStreams < 30 && speedTier > LjSpeed.Tortoise)
         {
             propOrder.RemoveAt(1);
         }
 
-        o.SplittingHeuristicsProperties = propOrder.GetRange(0, 7);
+        (int props, int maxValues, float repeats) = speedTier switch
+        {
+            LjSpeed.Hare => (4, 48, 0.5f),
+            LjSpeed.Wombat => (5, 64, 0.7f),
+            LjSpeed.Squirrel => (7, 96, 1.0f),
+            LjSpeed.Kitten => (10, 128, 1.1f),
+            LjSpeed.Glacier or LjSpeed.Tortoise => (propOrder.Count, 256, 1.3f),
+            _ => (3, 32, 0.3f),
+        };
+        o.SplittingHeuristicsProperties = propOrder.GetRange(0, props);
+        o.MaxPropertyValues = maxValues;
+        o.NbRepeats = Math.Min(1.0f, o.NbRepeats * repeats);
         return o;
     }
 
