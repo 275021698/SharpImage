@@ -63,6 +63,7 @@ internal struct TURecurse
 }
 
 /// <summary>class Entropy.</summary>
+[System.Runtime.CompilerServices.SkipLocalsInit]
 internal sealed unsafe partial class X265Entropy
 {
     public readonly byte* m_contextState;

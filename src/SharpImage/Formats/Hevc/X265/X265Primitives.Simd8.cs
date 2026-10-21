@@ -63,6 +63,44 @@ internal static unsafe partial class X265Primitives
         return (parity << 31) | ((uint)last << 8) | (uint)first;
     }
 
+    // PsyRdoQuant12 with 64-bit lanes: c = s * s << scaleBits, c' = c - ((psyScale * (f - s)) >> max) (the arithmetic
+    // shift as a logical one of the value biased by 2^62), the sum of c + c'
+    private static long PsyRdoQuant12Sse41(int log2TrSize, short* resi, short* fenc, long* costUncoded, int psyScale, uint blkPos)
+    {
+        int transformShift = MAX_TR_DYNAMIC_RANGE - X265_DEPTH - log2TrSize;
+        byte scaleBits = (byte)(SCALE_BITS - (2 * transformShift));
+        int max = Math.Max(0, (2 * transformShift) + 1);
+        uint trSize = 1u << log2TrSize;
+        var vScale = Vector128.Create(psyScale);
+        var bias = Vector128.Create(1L << 62);
+        var unbias = Vector128.Create((1L << 62) >> max);
+        byte m = (byte)max;
+        var sum = Vector128<long>.Zero;
+        for (int y = 0; y < MLS_CG_SIZE; y++, blkPos += trSize)
+        {
+            var s = Sse41.ConvertToVector128Int32(Vector128.CreateScalarUnsafe(*(long*)(resi + blkPos)).AsInt16());
+            var f = Sse41.ConvertToVector128Int32(Vector128.CreateScalarUnsafe(*(long*)(fenc + blkPos)).AsInt16());
+            var sq = Sse41.MultiplyLow(s, s);                                  // < 2^31
+            var pred = Sse2.Subtract(f, s);
+            var c0 = Sse2.ShiftLeftLogical(Sse41.ConvertToVector128Int64(sq), scaleBits);
+            var c1 = Sse2.ShiftLeftLogical(Sse41.ConvertToVector128Int64(Sse2.ShiftRightLogical128BitLane(sq, 8)), scaleBits);
+            var p0 = Sse41.Multiply(pred, vScale);                             // lanes 0, 2
+            var p1 = Sse41.Multiply(Sse2.ShiftRightLogical128BitLane(pred, 4), vScale);   // lanes 1, 3
+            var q0 = Sse2.Subtract(Sse2.ShiftRightLogical(Sse2.Add(p0, bias), m), unbias);
+            var q1 = Sse2.Subtract(Sse2.ShiftRightLogical(Sse2.Add(p1, bias), m), unbias);
+            // q0 = [psy0, psy2], q1 = [psy1, psy3] -> in order
+            var psyA = Sse2.UnpackLow(q0, q1);   // psy0, psy1
+            var psyB = Sse2.UnpackHigh(q0, q1);  // psy2, psy3
+            var cp0 = Sse2.Subtract(c0, psyA);
+            var cp1 = Sse2.Subtract(c1, psyB);
+            Sse2.Store(costUncoded + blkPos, cp0);
+            Sse2.Store(costUncoded + blkPos + 2, cp1);
+            sum = Sse2.Add(sum, Sse2.Add(Sse2.Add(c0, cp0), Sse2.Add(c1, cp1)));
+        }
+
+        return sum.GetElement(0) + sum.GetElement(1);
+    }
+
 #if !HIGH_BIT_DEPTH
     // 8 pixels as int16
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

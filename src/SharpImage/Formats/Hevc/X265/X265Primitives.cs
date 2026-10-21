@@ -259,9 +259,41 @@ internal static unsafe partial class X265Primitives
 
     public static void CopyPP(pixel* dst, long dstStride, pixel* src, long srcStride, int w, int h)
     {
-        for (int y = 0; y < h; y++)
+        int bytes = w * sizeof(pixel);
+        switch (bytes)
         {
-            Buffer.MemoryCopy(src + (y * srcStride), dst + (y * dstStride), w * sizeof(pixel), w * sizeof(pixel));
+            case 4:
+                for (int y = 0; y < h; y++, dst += dstStride, src += srcStride) *(uint*)dst = *(uint*)src;
+                return;
+            case 8:
+                for (int y = 0; y < h; y++, dst += dstStride, src += srcStride) *(ulong*)dst = *(ulong*)src;
+                return;
+            case 16:
+                for (int y = 0; y < h; y++, dst += dstStride, src += srcStride)
+                {
+                    System.Runtime.Intrinsics.Vector128.Store(System.Runtime.Intrinsics.Vector128.Load((byte*)src), (byte*)dst);
+                }
+
+                return;
+            case 32:
+            case 64:
+            case 128:
+                for (int y = 0; y < h; y++, dst += dstStride, src += srcStride)
+                {
+                    for (int x = 0; x < bytes; x += 16)
+                    {
+                        System.Runtime.Intrinsics.Vector128.Store(System.Runtime.Intrinsics.Vector128.Load((byte*)src + x), (byte*)dst + x);
+                    }
+                }
+
+                return;
+            default:
+                for (int y = 0; y < h; y++)
+                {
+                    Buffer.MemoryCopy(src + (y * srcStride), dst + (y * dstStride), bytes, bytes);
+                }
+
+                return;
         }
     }
 
@@ -916,6 +948,16 @@ internal static unsafe partial class X265Primitives
     /// totals twice: once without and once with the psy term); returns that sum.</summary>
     public static long PsyRdoQuant12(int log2TrSize, short* resiDctCoeff, short* fencDctCoeff, long* costUncoded, long psyScale, uint blkPos)
     {
+        if (System.Runtime.Intrinsics.X86.Sse41.IsSupported && psyScale == (int)psyScale)
+        {
+            return PsyRdoQuant12Sse41(log2TrSize, resiDctCoeff, fencDctCoeff, costUncoded, (int)psyScale, blkPos);
+        }
+
+        return PsyRdoQuant12Scalar(log2TrSize, resiDctCoeff, fencDctCoeff, costUncoded, psyScale, blkPos);
+    }
+
+    internal static long PsyRdoQuant12Scalar(int log2TrSize, short* resiDctCoeff, short* fencDctCoeff, long* costUncoded, long psyScale, uint blkPos)
+    {
         int transformShift = MAX_TR_DYNAMIC_RANGE - X265_DEPTH - log2TrSize;
         int scaleBits = SCALE_BITS - (2 * transformShift);
         uint trSize = 1u << log2TrSize;
@@ -1243,8 +1285,8 @@ internal static unsafe partial class X265Primitives
         }
     }
 
-    private static readonly sbyte[] AngleTable = { -32, -26, -21, -17, -13, -9, -5, -2, 0, 2, 5, 9, 13, 17, 21, 26, 32 };
-    private static readonly short[] InvAngleTable = { 4096, 1638, 910, 630, 482, 390, 315, 256 };
+    private static ReadOnlySpan<sbyte> AngleTable => [-32, -26, -21, -17, -13, -9, -5, -2, 0, 2, 5, 9, 13, 17, 21, 26, 32];
+    private static ReadOnlySpan<short> InvAngleTable => [4096, 1638, 910, 630, 482, 390, 315, 256];
 
     public static void IntraPredAng(int width, pixel* dst, long dstStride, pixel* srcPix0, int dirMode, int bFilter)
     {

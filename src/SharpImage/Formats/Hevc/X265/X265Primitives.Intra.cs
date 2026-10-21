@@ -108,6 +108,7 @@ internal static unsafe partial class X265Primitives
     /// for a horizontal mode the left samples are the main side and the output is the transposed prediction), with 16
     /// bytes of readable padding after it.
     /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void AngularVertical8(int size, byte* frame, int angle, int invAngle, byte* dst, long dstStride, bool edgeFilter)
     {
         int width2 = size << 1;

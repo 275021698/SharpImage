@@ -100,6 +100,7 @@ internal unsafe struct IntraNeighbors
 }
 
 /// <summary>class Predict (intra prediction).</summary>
+[System.Runtime.CompilerServices.SkipLocalsInit]
 internal unsafe class X265Predict
 {
     // unfiltered / filtered neighbours of the current partition

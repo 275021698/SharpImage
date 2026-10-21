@@ -64,6 +64,8 @@ public sealed class X265PrimitivesTests
         short* c = stackalloc short[32 * 32];
         short* dqA = stackalloc short[32 * 32];
         short* dqB = stackalloc short[32 * 32];
+        long* costA = stackalloc long[32 * 32];
+        long* costB = stackalloc long[32 * 32];
         for (int iter = 0; iter < 20000; iter++)
         {
             int density = 1 + (iter % 7);
@@ -81,6 +83,15 @@ public sealed class X265PrimitivesTests
             X265.X265Primitives.DequantNormal(c, dqA, n, scale, shift);
             X265.X265Primitives.DequantNormalScalar(c, dqB, n, scale, shift);
             for (int i = 0; i < n; i++) if (dqA[i] != dqB[i]) bad++;
+
+            // psyRdoQuant of one group (the fenc coefficients are the same kind of int16 block)
+            int log2 = 2 + (iter & 3);
+            long psyScale = (iter % 5) switch { 0 => 256L * 23000, 1 => 256, 2 => 1, 3 => 256L * 300, _ => 256L * rnd.Next(1, 90000) };
+            uint blk = (uint)(4 * rnd.Next(1 << (log2 - 2)));
+            long sa = X265.X265Primitives.PsyRdoQuant12(log2, c, dqA, costA, psyScale, blk);
+            long sb = X265.X265Primitives.PsyRdoQuant12Scalar(log2, c, dqA, costB, psyScale, blk);
+            if (sa != sb) bad++;
+            for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++) if (costA[blk + (y << log2) + x] != costB[blk + (y << log2) + x]) bad++;
             ushort* scan4 = X265.X265Scan.Scan4x4[iter % 3];
             long trSize = 4 << (iter & 3);
             if (X265.X265Primitives.FindPosFirstLast(c + 4, trSize, scan4) != X265.X265Primitives.FindPosFirstLastScalar(c + 4, trSize, scan4)) bad++;

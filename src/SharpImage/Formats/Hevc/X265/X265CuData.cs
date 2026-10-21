@@ -64,6 +64,7 @@ internal static unsafe class X265Scan
 }
 
 /// <summary>class CUData.</summary>
+[System.Runtime.CompilerServices.SkipLocalsInit]
 internal sealed unsafe class X265CuData
 {
     public const int BytesPerPartition = 24;
@@ -163,9 +164,63 @@ internal sealed unsafe class X265CuData
         }
     }
 
-    private static void PartSet(byte* dst, byte val, uint n) => new Span<byte>(dst, (int)n).Fill(val);
+    // n bytes of val (n a power of 4: the partitions of a square block)
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+    private static void PartSet(byte* dst, byte val, uint n)
+    {
+        switch (n)
+        {
+            case 1:
+                *dst = val;
+                return;
+            case 4:
+                *(uint*)dst = val * 0x01010101u;
+                return;
+            case 16:
+                System.Runtime.Intrinsics.Vector128.Store(System.Runtime.Intrinsics.Vector128.Create(val), dst);
+                return;
+            case 64:
+            {
+                var v = System.Runtime.Intrinsics.Vector128.Create(val);
+                System.Runtime.Intrinsics.Vector128.Store(v, dst);
+                System.Runtime.Intrinsics.Vector128.Store(v, dst + 16);
+                System.Runtime.Intrinsics.Vector128.Store(v, dst + 32);
+                System.Runtime.Intrinsics.Vector128.Store(v, dst + 48);
+                return;
+            }
 
-    private static void PartCopy(byte* dst, byte* src, uint n) => Buffer.MemoryCopy(src, dst, n, n);
+            default:
+                new Span<byte>(dst, (int)n).Fill(val);
+                return;
+        }
+    }
+
+    // n bytes (n a power of 4: the partitions of a square block)
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+    private static void PartCopy(byte* dst, byte* src, uint n)
+    {
+        switch (n)
+        {
+            case 1:
+                *dst = *src;
+                return;
+            case 4:
+                *(uint*)dst = *(uint*)src;
+                return;
+            case 16:
+                System.Runtime.Intrinsics.Vector128.Store(System.Runtime.Intrinsics.Vector128.Load(src), dst);
+                return;
+            case 64:
+                System.Runtime.Intrinsics.Vector128.Store(System.Runtime.Intrinsics.Vector128.Load(src), dst);
+                System.Runtime.Intrinsics.Vector128.Store(System.Runtime.Intrinsics.Vector128.Load(src + 16), dst + 16);
+                System.Runtime.Intrinsics.Vector128.Store(System.Runtime.Intrinsics.Vector128.Load(src + 32), dst + 32);
+                System.Runtime.Intrinsics.Vector128.Store(System.Runtime.Intrinsics.Vector128.Load(src + 48), dst + 48);
+                return;
+            default:
+                Buffer.MemoryCopy(src, dst, n, n);
+                return;
+        }
+    }
 
     /// <summary>s_partSet[depth]: number of parts covered by a CU at an absolute depth.</summary>
     private uint PartsAtDepth(uint depth) => (s_numPartInCUSize * s_numPartInCUSize) >> (int)(depth * 2);

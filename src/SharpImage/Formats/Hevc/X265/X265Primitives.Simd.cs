@@ -89,10 +89,11 @@ internal static unsafe partial class X265Primitives
             return System.Runtime.Intrinsics.X86.Bmi2.ParallelBitExtract(value, mask);
         }
 
+        // each set bit of value & mask goes to its rank among mask's set bits
         uint r = 0;
-        for (int k = 0; mask != 0; mask &= mask - 1, k++)
+        for (uint m = value & mask; m != 0; m &= m - 1)
         {
-            r |= ((value >> BitOperations.TrailingZeroCount(mask)) & 1) << k;
+            r |= 1u << BitOperations.PopCount(mask & ((1u << BitOperations.TrailingZeroCount(m)) - 1));
         }
 
         return r;
