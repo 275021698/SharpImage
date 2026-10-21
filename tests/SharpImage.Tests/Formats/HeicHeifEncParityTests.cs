@@ -6,7 +6,8 @@ namespace SharpImage.Tests.Formats;
 /// HEIC output byte-identical to libheif 1.23.6's heif-enc with x265 (TestAssets/heic_heifenc: <c>heif-enc in -q Q -o
 /// out.heic</c>, x265 4.2+59 C build, identical to the x265 in pillow_heif 1.8.1): PNG input through the RGB -> YCbCr
 /// pixel path (gray, alpha, ICC, odd and small sizes with clap), JPEG input through the raw YCbCr planes (Exif
-/// orientation as irot/imir, ICC, Exif + XMP items).
+/// orientation as irot/imir, ICC, Exif + XMP items; 4:4:4 / 4:2:2 through libheif's conversions, other samplings
+/// through libjpeg's full-size output, CMYK as heif-enc converts it).
 /// </summary>
 public sealed class HeicHeifEncParityTests
 {
@@ -36,6 +37,12 @@ public sealed class HeicHeifEncParityTests
     [Arguments("xmp.jpg", 90)]
     [Arguments("gray_jpeg.jpg", 50)]
     [Arguments("icc.jpg", 50)]
+    [Arguments("s444.jpg", 50)]
+    [Arguments("s422.jpg", 50)]
+    [Arguments("s440.jpg", 50)]
+    [Arguments("s411.jpg", 50)]
+    [Arguments("smix.jpg", 50)]
+    [Arguments("cmyk.jpg", 50)]
     public async Task Jpeg_MatchesHeifEnc(string input, int quality)
     {
         byte[] heic = HeifCoder.EncodeHeicFromJpeg(File.ReadAllBytes(Asset(input)), new HeicEncodeOptions { Quality = quality });

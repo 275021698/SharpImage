@@ -31,15 +31,81 @@ public static partial class HeifCoder
 
         var raw = JpegCoder.ReadRawYuv(jpeg);
         int q = Math.Clamp(options.Quality, 0, 100);
-        if (raw != null && raw.Layout is Av1.Av1PixelLayout.I420 or Av1.Av1PixelLayout.I400)
+        if (raw != null)
         {
             bool mono = raw.Layout == Av1.Av1PixelLayout.I400;
-            return Hevc.HeicEncoder.EncodeYuv(raw.Planes[0], mono ? null : raw.Planes[1], mono ? null : raw.Planes[2], mono ? 0 : 1,
+            int chroma = raw.Layout switch
+            {
+                Av1.Av1PixelLayout.I400 => 0,
+                Av1.Av1PixelLayout.I420 => 1,
+                Av1.Av1PixelLayout.I422 => 2,
+                _ => 3,
+            };
+            return Hevc.HeicEncoder.EncodeYuv(raw.Planes[0], mono ? null : raw.Planes[1], mono ? null : raw.Planes[2], chroma,
                 null, raw.Width, raw.Height, colorDescription: false, q, options.Qp, 1, 13, icc, exif, xmp, orientation);
         }
 
-        using var image = JpegCoder.Read(new MemoryStream(jpeg));
+        // other YCbCr samplings: libjpeg's full-size YCbCr output (its upsamplers), chroma point-sampled at even positions
+        var comps = JpegCoder.ReadComponents(jpeg);
+        if (comps != null && comps.Planes.Length == 3 && !comps.IsRgb)
+        {
+            int w = comps.Width, h = comps.Height;
+            var full = new byte[3][];
+            for (int ci = 0; ci < 3; ci++) full[ci] = JpegCoder.Upsample(comps, ci) ?? throw new NotSupportedException("JPEG sampling not supported.");
+            int cw = (w + 1) / 2, chh = (h + 1) / 2;
+            var cb = new byte[cw * chh];
+            var cr = new byte[cw * chh];
+            for (int cy = 0; cy < chh; cy++)
+            {
+                for (int cx = 0; cx < cw; cx++)
+                {
+                    cb[(cy * cw) + cx] = full[1][(cy * 2 * w) + (cx * 2)];
+                    cr[(cy * cw) + cx] = full[2][(cy * 2 * w) + (cx * 2)];
+                }
+            }
+
+            return Hevc.HeicEncoder.EncodeYuv(full[0], cb, cr, 1, null, w, h, colorDescription: false, q, options.Qp, 1, 13, icc, exif,
+                xmp, orientation);
+        }
+
+        using var image = JpegCoder.ReadLibjpegExact(jpeg);
+        if (image.Colorspace == SharpImage.Core.ColorspaceType.CMYK)
+        {
+            // heif-enc's CMYK / YCCK reading: libjpeg's CMYK samples (Adobe-inverted, as stored) to RGB as C*K/255 etc.
+            // A CMYK ICC profile cannot describe the RGB result and is dropped (heif-enc copies it into colr).
+            bool adobe = false;
+            foreach (var (marker, off, len) in segs)
+            {
+                if (marker == 0xEE && len >= 12 && jpeg.AsSpan(off, 5).SequenceEqual("Adobe"u8)) adobe = true;
+            }
+
+            int w = (int)image.Columns, h = (int)image.Rows, nch = image.NumberOfChannels;
+            var rgb = new byte[w * h * 3];
+            for (int y = 0; y < h; y++)
+            {
+                var row = image.GetPixelRow(y);
+                for (int x = 0; x < w; x++)
+                {
+                    int o = x * nch, d = ((y * w) + x) * 3;
+                    int k = Raw(row[o + 3], adobe);
+                    rgb[d] = (byte)(Raw(row[o], adobe) * k / 255);
+                    rgb[d + 1] = (byte)(Raw(row[o + 1], adobe) * k / 255);
+                    rgb[d + 2] = (byte)(Raw(row[o + 2], adobe) * k / 255);
+                }
+            }
+
+            bool cmykIcc = icc is { Length: >= 20 } && icc.AsSpan(16, 4).SequenceEqual("CMYK"u8);
+            return Hevc.HeicEncoder.Encode(rgb, w, h, 3, q, options.Qp, 1, 13, cmykIcc ? null : icc, exif, xmp, orientation);
+        }
+
         return EncodeHeic(image, options);
+
+        // libjpeg's CMYK sample from the frame's ink amount (Adobe files store inverted samples)
+        static int Raw(ushort ink, bool adobe)
+        {
+            int v = SharpImage.Core.Quantum.ScaleToByte(ink);
+            return adobe ? 255 - v : v;
+        }
     }
 
     // libjpeg's read_icc_profile (as heif-enc's ReadICCProfileFromJPEG): the APP2 ICC_PROFILE chunks in sequence-number

@@ -141,7 +141,7 @@ public static partial class JpegCoder
     // fancy (triangle filter) when the component is more than 2 samples wide, else replication; 1:2 vertical -> h1v2
     // fancy; 2:2 -> h2v2 fancy when more than 2 samples wide, else replication; other integral ratios -> replication
     // (int_upsample). The rows above / below the image repeat its first / last row (jdmainct's context pointers).
-    private static byte[]? Upsample(JpegComponents c, int ci)
+    internal static byte[]? Upsample(JpegComponents c, int ci)
     {
         int w = c.Width, h = c.Height, sw = c.Widths[ci], sh = c.Heights[ci];
         byte[] src = c.Planes[ci];

@@ -63,7 +63,22 @@ internal static class HeicEncoder
         bool colorDescription, int quality, int? constantQp, int colorPrimaries = 1, int transferCharacteristics = 13,
         byte[]? icc = null, byte[]? exif = null, byte[]? xmp = null, int orientation = 1)
     {
-        if (chromaFormat is not (0 or 1)) throw new NotSupportedException("HEIC encoding supports 4:0:0 and 4:2:0.");
+        // libheif's x265 plugin codes 4:2:0: libheif's colour conversion pipeline brings 4:4:4 there with its averaging
+        // filter and 4:2:2 through RGB, and the converted image carries the output nclx
+        if (chromaFormat == 3)
+        {
+            (cb, cr) = YCbCr444To420(cb!, cr!, width, height);
+            chromaFormat = 1;
+            colorDescription = true;
+        }
+        else if (chromaFormat == 2)
+        {
+            (y, cb, cr) = YCbCr422To420ViaRgb(y, cb!, cr!, width, height);
+            chromaFormat = 1;
+            colorDescription = true;
+        }
+
+        if (chromaFormat is not (0 or 1)) throw new ArgumentOutOfRangeException(nameof(chromaFormat));
 
         // libheif's x265 plugin: the picture is the rounded size (even, at least 64), edge-replicated, and the CTU size
         // halves from 64 while the image is smaller than it
@@ -203,6 +218,100 @@ internal static class HeicEncoder
         }
 
         return (y, cb, cr);
+    }
+
+    /// <summary>libheif's Op_YCbCr444_to_YCbCr420_average: the rounded mean of each 2x2 block (of the 2 samples at an
+    /// odd edge, the sample itself at an odd corner).</summary>
+    private static (byte[] Cb, byte[] Cr) YCbCr444To420(byte[] cb, byte[] cr, int w, int h)
+    {
+        int cw = (w + 1) / 2, chh = (h + 1) / 2;
+        var ocb = new byte[cw * chh];
+        var ocr = new byte[cw * chh];
+        foreach (var (src, dst) in new[] { (cb, ocb), (cr, ocr) })
+        {
+            if ((h & 1) != 0)
+            {
+                for (int x = 0; x < w - 1; x += 2) dst[((chh - 1) * cw) + (x / 2)] = (byte)((src[((h - 1) * w) + x] + src[((h - 1) * w) + x + 1] + 1) / 2);
+            }
+
+            if ((w & 1) != 0)
+            {
+                for (int y = 0; y < h - 1; y += 2) dst[((y / 2) * cw) + cw - 1] = (byte)((src[(y * w) + w - 1] + src[((y + 1) * w) + w - 1] + 1) / 2);
+            }
+
+            if ((w & 1) != 0 && (h & 1) != 0) dst[((chh - 1) * cw) + cw - 1] = src[((h - 1) * w) + w - 1];
+
+            for (int y = 0; y < h - 1; y += 2)
+            {
+                for (int x = 0; x < w - 1; x += 2)
+                {
+                    int o = (y * w) + x;
+                    dst[((y / 2) * cw) + (x / 2)] = (byte)((src[o] + src[o + 1] + src[o + w] + src[o + w + 1] + 2) / 4);
+                }
+            }
+        }
+
+        return (ocb, ocr);
+    }
+
+    /// <summary>
+    /// libheif's 4:2:2 -> 4:2:0 pipeline: Op_YCbCr_to_RGB (nearest-neighbour chroma, the default BT.601 coefficients of
+    /// an image without nclx, full range) to planar RGB, then Op_RGB_to_YCbCr (matrix 6, full range; chroma from the
+    /// float mean of each 2x2 RGB block, the edge samples repeated at odd edges).
+    /// </summary>
+    private static (byte[] Y, byte[] Cb, byte[] Cr) YCbCr422To420ViaRgb(byte[] y, byte[] cb, byte[] cr, int w, int h)
+    {
+        const float rCr = 1.402f, gCb = -0.344136f, gCr = -0.714136f, bCb = 1.772f;
+        int cw422 = (w + 1) / 2;
+        var r = new byte[w * h];
+        var g = new byte[w * h];
+        var b = new byte[w * h];
+        for (int yy = 0; yy < h; yy++)
+        {
+            for (int x = 0; x < w; x++)
+            {
+                float fy = y[(yy * w) + x];
+                float fcb = cb[(yy * cw422) + (x >> 1)] - 128;
+                float fcr = cr[(yy * cw422) + (x >> 1)] - 128;
+                int i = (yy * w) + x;
+                r[i] = ClipToByte(fy + (rCr * fcr));
+                g[i] = ClipToByte(fy + (gCb * fcb) + (gCr * fcr));
+                b[i] = ClipToByte(fy + (bCb * fcb));
+            }
+        }
+
+        const float kr = 0.299f, kb = 0.114f;
+        float kg = 1f - kr - kb;
+        float c10 = -kr / (1f - kb) / 2f, c11 = -kg / (1f - kb) / 2f, c12 = 0.5f;
+        float c20 = 0.5f, c21 = -kg / (1f - kr) / 2f, c22 = -kb / (1f - kr) / 2f;
+        var oy = new byte[w * h];
+        for (int i = 0; i < oy.Length; i++)
+        {
+            float fr = r[i], fg = g[i], fb = b[i];
+            oy[i] = ClipToByte((fr * kr) + (fg * kg) + (fb * kb));
+        }
+
+        int cw = (w + 1) / 2, chh = (h + 1) / 2;
+        var ocb = new byte[cw * chh];
+        var ocr = new byte[cw * chh];
+        for (int yy = 0; yy < h; yy += 2)
+        {
+            int y2 = yy + 1 < h ? yy + 1 : yy;
+            for (int x = 0; x < w; x += 2)
+            {
+                int x2 = x + 1 < w ? x + 1 : x;
+                int p00 = (yy * w) + x, p01 = (yy * w) + x2, p10 = (y2 * w) + x, p11 = (y2 * w) + x2;
+                float fr = r[p00], fg = g[p00], fb = b[p00];
+                fr += r[p01]; fg += g[p01]; fb += b[p01];
+                fr += r[p10]; fg += g[p10]; fb += b[p10];
+                fr += r[p11]; fg += g[p11]; fb += b[p11];
+                fr *= 0.25f; fg *= 0.25f; fb *= 0.25f;
+                ocb[((yy / 2) * cw) + (x / 2)] = ClipToByte((fr * c10) + (fg * c11) + (fb * c12) + 128f);
+                ocr[((yy / 2) * cw) + (x / 2)] = ClipToByte((fr * c20) + (fg * c21) + (fb * c22) + 128f);
+            }
+        }
+
+        return (oy, ocb, ocr);
     }
 
     // (int32_t)(v + 0.5f), clipped to 0..255
