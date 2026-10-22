@@ -133,6 +133,14 @@ internal unsafe class X265Search : X265Predict
     private int m_lumaTuCur;
     private bool m_lumaTuCapture, m_lumaTuCaptured, m_lumaTuReplay;
 
+    // EstIntraPredChromaQT tries each chroma mode on the same TUs: the first TU of a section has the same neighbour
+    // samples for every mode (the later ones see the mode's own reconstruction), kept from the first mode (not 4:4:4,
+    // which also smooths them)
+    private readonly pixel* m_chromaNb;
+    private int m_chromaNbStamp, m_chromaNbValid = -1;
+    private uint m_chromaNbAbs;
+    private bool m_chromaNbOn;
+
     protected X265Search(X265Arena arena, X265Param param) : base(arena, param.internalCsp)
     {
         m_param = param;
@@ -196,6 +204,7 @@ internal unsafe class X265Search : X265Predict
             };
         }
 
+        m_chromaNb = arena.Alloc<pixel>(2 * 160);
         m_intraPred = arena.Alloc<pixel>((32 * 32) * (33 + 3));
         m_fencScaled = m_intraPred + (32 * 32);
         m_fencTransposed = m_fencScaled + (32 * 32);
@@ -565,8 +574,13 @@ internal unsafe class X265Search : X265Predict
         do
         {
             uint absPartIdxC = tuIterator.absPartIdxTURelCU;
-            IntraNeighbors intraNeighbors;
-            InitIntraNeighbors(cu, absPartIdxC, tuDepthC, false, &intraNeighbors);
+            bool nbFirst = m_chromaNbOn && absPartIdxC == m_chromaNbAbs;
+            bool nbKept = nbFirst && m_chromaNbValid == m_chromaNbStamp;
+            System.Runtime.CompilerServices.Unsafe.SkipInit(out IntraNeighbors intraNeighbors);
+            if (!nbKept)
+            {
+                InitIntraNeighbors(cu, absPartIdxC, tuDepthC, false, &intraNeighbors);
+            }
 
             for (uint chromaId = TEXT_CHROMA_U; chromaId <= TEXT_CHROMA_V; chromaId++)
             {
@@ -588,7 +602,21 @@ internal unsafe class X265Search : X265Predict
                     chromaPredMode = cu.m_lumaIntraDir[m_csp == X265_CSP_I444 ? absPartIdxC : 0];
                 }
 
-                InitAdiPatternChroma(cu, *cuGeom, absPartIdxC, intraNeighbors, chromaId);
+                pixel* kept = m_chromaNb + ((chromaId - TEXT_CHROMA_U) * 160);
+                int nbSamples = (4 * nC) + 1;
+                if (nbKept)
+                {
+                    X265Primitives.CopyBytes(intraNeighbourBuf0, kept, nbSamples * sizeof(pixel));
+                }
+                else
+                {
+                    InitAdiPatternChroma(cu, *cuGeom, absPartIdxC, intraNeighbors, chromaId);
+                    if (nbFirst)
+                    {
+                        X265Primitives.CopyBytes(kept, intraNeighbourBuf0, nbSamples * sizeof(pixel));
+                    }
+                }
+
                 PredIntraChromaAng(chromaPredMode, pred, stride, log2TrSizeC);
                 cu.SetTransformSkipPartRange(0, ttype, absPartIdxC, tuIterator.absPartIdxStep);
 
@@ -613,6 +641,11 @@ internal unsafe class X265Search : X265Predict
                 }
 
                 X265Primitives.CopyPP(picReconC, picStride, reconQt, reconQtStride, nC, nC);
+            }
+
+            if (nbFirst)
+            {
+                m_chromaNbValid = m_chromaNbStamp;
             }
         }
         while (tuIterator.IsNextSection());
@@ -899,6 +932,9 @@ internal unsafe class X265Search : X265Predict
                 cu.GetAllowedChromaDir(absPartIdxC, modeList);
             }
 
+            m_chromaNbOn = m_csp != X265_CSP_I444;
+            m_chromaNbAbs = absPartIdxC;
+            m_chromaNbStamp++;
             for (uint mode = minMode; mode < maxMode; mode++)
             {
                 m_entropyCoder.Load(m_rqt[depth].cur);
@@ -938,6 +974,7 @@ internal unsafe class X265Search : X265Predict
                 }
             }
 
+            m_chromaNbOn = false;
             if (!tuIterator.IsLastSection())
             {
                 uint zorder = cuGeom->absPartIdx + absPartIdxC;
