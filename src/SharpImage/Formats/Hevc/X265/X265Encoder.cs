@@ -222,12 +222,7 @@ internal static unsafe class X265Encoder
         frame.m_reconPic = new X265PicYuv(arena, p.sourceWidth, p.sourceHeight, p.internalCsp, p.maxCUSize);
         frame.m_reconPic.ShareOffsets(frame.m_fencPic);
         frame.m_fencPic.CopyFromPicture(y, u, v, strideY, strideC, conf.rightOffset, conf.bottomOffset);
-        frame.m_picCTU = new X265CuData[sps.numCUsInFrame];
-        for (uint i = 0; i < sps.numCUsInFrame; i++)
-        {
-            frame.m_picCTU[i] = new X265CuData();
-            frame.m_picCTU[i].Initialize(arena, 0, p.internalCsp, (uint)p.num4x4Partitions, (uint)p.maxCUSize, (uint)p.unitSizeDepth, p.maxLog2CUSize);
-        }
+        frame.m_picCTU = X265CuData.CreateCTUs(arena, sps.numCUsInFrame, p.internalCsp, (uint)p.num4x4Partitions, (uint)p.maxCUSize, (uint)p.unitSizeDepth);
 
         frame.m_cuStatBaseQp = new double[sps.numCUsInFrame];
         if (slice.m_bUseSao)

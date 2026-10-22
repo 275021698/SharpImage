@@ -244,7 +244,17 @@ internal sealed unsafe class X265Arena : IDisposable
     {
         nuint bytes = (nuint)Math.Max(1, count * sizeof(T));
         void* p = NativeMemory.AlignedAlloc(bytes, 64);
-        NativeMemory.Clear(p, bytes);
+        if (bytes >= (4u << 20))
+        {
+            // large blocks (pictures, the CTUs' data): the zeroing (first touch of the pages) in parallel
+            const int chunk = 1 << 20;
+            System.Threading.Tasks.Parallel.For(0, (int)((bytes + chunk - 1) / chunk), i =>
+                NativeMemory.Clear((byte*)p + ((long)i * chunk), (nuint)Math.Min(chunk, (long)bytes - ((long)i * chunk))));
+        }
+        else
+        {
+            NativeMemory.Clear(p, bytes);
+        }
         blocks.Add((nint)p);
         return (T*)p;
     }

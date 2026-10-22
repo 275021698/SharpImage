@@ -131,31 +131,40 @@ internal sealed unsafe class X265PicYuv
         pady++;
 
         pixel* Y = m_picOrg[0];
-        for (int r = 0; r < height; r++)
+        bool chroma = m_picCsp != X265_CSP_I400;
+        int cwid = width >> m_hChromaShift;
+        int cpadx = padx >> m_hChromaShift;
+        long stride = m_stride, strideC = m_strideC;
+        pixel* org1 = chroma ? m_picOrg[1] : null, org2 = chroma ? m_picOrg[2] : null;
+        int vShift = m_vChromaShift;
+        fixed (pixel* ys = y, us = u, vs = v)
         {
-            y.Slice(r * srcStride, width).CopyTo(new Span<pixel>(Y + ((long)r * m_stride), width));
-        }
-
-        if (m_picCsp != X265_CSP_I400)
-        {
-            int cwid = width >> m_hChromaShift;
-            for (int r = 0; r < height >> m_vChromaShift; r++)
+            pixel* yp = ys, up = us, vp = vs;
+            // the rows (and their right edge extensions) in bands of 64 luma rows
+            System.Threading.Tasks.Parallel.For(0, (height + 63) / 64, band =>
             {
-                u.Slice(r * srcStrideC, cwid).CopyTo(new Span<pixel>(m_picOrg[1] + ((long)r * m_strideC), cwid));
-                v.Slice(r * srcStrideC, cwid).CopyTo(new Span<pixel>(m_picOrg[2] + ((long)r * m_strideC), cwid));
-            }
+                for (int r = band * 64; r < Math.Min(height, (band + 1) * 64); r++)
+                {
+                    pixel* dst = Y + (r * stride);
+                    new ReadOnlySpan<pixel>(yp + ((long)r * srcStride), width).CopyTo(new Span<pixel>(dst, width));
+                    for (int x = 0; x < padx; x++)
+                    {
+                        dst[width + x] = dst[width - 1];
+                    }
+                }
+
+                if (chroma)
+                {
+                    for (int r = (band * 64) >> vShift; r < Math.Min(height >> vShift, ((band + 1) * 64) >> vShift); r++)
+                    {
+                        new ReadOnlySpan<pixel>(up + ((long)r * srcStrideC), cwid).CopyTo(new Span<pixel>(org1 + (r * strideC), cwid));
+                        new ReadOnlySpan<pixel>(vp + ((long)r * srcStrideC), cwid).CopyTo(new Span<pixel>(org2 + (r * strideC), cwid));
+                    }
+                }
+            });
         }
 
-        // extend the right edge, then the bottom
-        for (int r = 0; r < height; r++)
-        {
-            for (int x = 0; x < padx; x++)
-            {
-                Y[width + x] = Y[width - 1];
-            }
-
-            Y += m_stride;
-        }
+        Y += (long)height * m_stride;
 
         Y = m_picOrg[0] + ((long)(height - 1) * m_stride);
         for (int i = 1; i <= pady; i++)

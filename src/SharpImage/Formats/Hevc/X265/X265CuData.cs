@@ -109,13 +109,47 @@ internal sealed unsafe class X265CuData
     /// <summary>CUData::initialize: this CU's arrays in its own block of the given depth's size.</summary>
     public void Initialize(X265Arena arena, uint depth, int csp, uint num4x4Partitions, uint maxCUSize, uint unitSizeDepth, int maxLog2CUSize)
     {
+        uint n = num4x4Partitions >> (int)(depth * 2);
+        bool i400 = csp == X265_CSP_I400;
+        uint cuSize = maxCUSize >> (int)depth;
+        uint sizeL = cuSize * cuSize;
+        uint coeffs = i400 ? sizeL : sizeL + 2 * (sizeL >> (csp == X265_CSP_I420 ? 2 : 0));
+        InitializeAt(arena.Alloc<byte>(n * (i400 ? BytesPerPartition - 4 : BytesPerPartition)), arena.Alloc<sse_t>(n), arena.Alloc<short>(coeffs),
+            depth, csp, num4x4Partitions, maxCUSize, unitSizeDepth);
+    }
+
+    /// <summary>The picture's CTUs (depth 0): their arrays in one block, set up in parallel.</summary>
+    public static X265CuData[] CreateCTUs(X265Arena arena, uint count, int csp, uint num4x4Partitions, uint maxCUSize, uint unitSizeDepth)
+    {
+        uint n = num4x4Partitions;
+        bool i400 = csp == X265_CSP_I400;
+        uint sizeL = maxCUSize * maxCUSize;
+        long coeffs = i400 ? sizeL : sizeL + 2 * (sizeL >> (csp == X265_CSP_I420 ? 2 : 0));
+        long charBytes = (n * (i400 ? BytesPerPartition - 4 : BytesPerPartition) + 63) & ~63L;
+        long distBytes = (n * sizeof(sse_t) + 63) & ~63L;
+        long coeffBytes = ((coeffs * 2) + 63) & ~63L;
+        long per = charBytes + distBytes + coeffBytes;
+        byte* mem = arena.Alloc<byte>(per * count);
+        var ctus = new X265CuData[count];
+        System.Threading.Tasks.Parallel.For(0, (int)count, i =>
+        {
+            byte* b = mem + (i * per);
+            var cu = new X265CuData();
+            cu.InitializeAt(b, (sse_t*)(b + charBytes), (short*)(b + charBytes + distBytes), 0, csp, num4x4Partitions, maxCUSize, unitSizeDepth);
+            ctus[i] = cu;
+        });
+        return ctus;
+    }
+
+    // the arrays in zeroed storage: charBuf the per-partition bytes, dist the distortions, coeff the coefficients
+    private void InitializeAt(byte* charBuf, sse_t* dist, short* coeff, uint depth, int csp, uint num4x4Partitions, uint maxCUSize, uint unitSizeDepth)
+    {
         m_chromaFormat = csp;
         m_hChromaShift = m_vChromaShift = csp == X265_CSP_I420 ? 1 : 0;
         m_numPartitions = num4x4Partitions >> (int)(depth * 2);
         s_numPartInCUSize = 1u << (int)unitSizeDepth;
         uint n = m_numPartitions;
         bool i400 = csp == X265_CSP_I400;
-        byte* charBuf = arena.Alloc<byte>(n * (i400 ? BytesPerPartition - 4 : BytesPerPartition));
         m_qp = (sbyte*)charBuf; charBuf += n;
         m_qpAnalysis = (sbyte*)charBuf; charBuf += n;
         m_log2CUSize = charBuf; charBuf += n;
@@ -148,17 +182,13 @@ internal sealed unsafe class X265CuData
         }
 
         m_chromaIntraDir = charBuf;
-        m_distortion = arena.Alloc<sse_t>(n);
+        m_distortion = dist;
         uint cuSize = maxCUSize >> (int)depth;
         uint sizeL = cuSize * cuSize;
-        if (i400)
-        {
-            m_trCoeff[0] = arena.Alloc<short>(sizeL);
-        }
-        else
+        m_trCoeff[0] = coeff;
+        if (!i400)
         {
             uint sizeC = sizeL >> (m_hChromaShift + m_vChromaShift);
-            m_trCoeff[0] = arena.Alloc<short>(sizeL + (sizeC * 2));
             m_trCoeff[1] = m_trCoeff[0] + sizeL;
             m_trCoeff[2] = m_trCoeff[0] + sizeL + sizeC;
         }
