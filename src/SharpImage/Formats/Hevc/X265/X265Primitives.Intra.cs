@@ -32,6 +32,12 @@ internal static unsafe partial class X265Primitives
     /// <summary>intra_pred[dirMode] for an angular mode, 8-bit pixels.</summary>
     private static void IntraPredAng8(int width, byte* dst, long dstStride, byte* srcPix, int dirMode, int bFilter)
     {
+        if (width == 4)
+        {
+            IntraPredAng4(dst, dstStride, srcPix, dirMode, bFilter != 0);
+            return;
+        }
+
         bool horMode = dirMode < 18;
         int angleOffset = horMode ? 10 - dirMode : dirMode - 26;
         int angle = AngleTable[8 + angleOffset];
@@ -236,6 +242,46 @@ internal static unsafe partial class X265Primitives
     // left samples, the first 7 above
     private static Vector128<byte> HorFrame4A { [MethodImpl(MethodImplOptions.AggressiveInlining)] get => Vector128.Create((byte)0, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 1, 2, 3, 4, 5, 6, 7); }
     private static Vector128<byte> HorFrame4B { [MethodImpl(MethodImplOptions.AggressiveInlining)] get => Vector128.Create((byte)0x80, 8, 9, 10, 11, 12, 13, 14, 15, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80); }
+
+    // one angular mode of a 4x4 block from the all-angles tables (a horizontal mode transposed back by pshufb)
+    private static void IntraPredAng4(byte* dst, long dstStride, byte* srcPix, int dirMode, bool edgeFilter)
+    {
+        int m = dirMode - 2;
+        var vert = Sse2.LoadVector128(srcPix);
+        var frame = m < 16 ? Sse2.Or(Ssse3.Shuffle(vert, HorFrame4A), Ssse3.Shuffle(Sse2.LoadVector128(srcPix + 1), HorFrame4B)) : vert;
+        byte* index = X265Tables.Ptr(AllAngs4Index) + (m * 32);
+        sbyte* weights = (sbyte*)X265Tables.Ptr(AllAngs4Weights) + (m * 32);
+        var round = Vector128.Create((short)16);
+        var r01 = Ssse3.MultiplyAddAdjacent(Ssse3.Shuffle(frame, Sse2.LoadVector128(index)), Sse2.LoadVector128(weights));
+        var r23 = Ssse3.MultiplyAddAdjacent(Ssse3.Shuffle(frame, Sse2.LoadVector128(index + 16)), Sse2.LoadVector128(weights + 16));
+        var block = Sse2.PackUnsignedSaturate(Sse2.ShiftRightArithmetic(Sse2.Add(r01, round), 5), Sse2.ShiftRightArithmetic(Sse2.Add(r23, round), 5));
+        if (edgeFilter && (dirMode == 10 || dirMode == 26))
+        {
+            // column 0 (of the vertical frame) from the side samples
+            byte* b = stackalloc byte[16];
+            Sse2.Store(b, block);
+            int topLeft = srcPix[0];
+            for (int y = 0; y < 4; y++)
+            {
+                b[y * 4] = dirMode == 26
+                    ? ClipPixel(srcPix[1] + ((srcPix[9 + y] - topLeft) >> 1))
+                    : ClipPixel(srcPix[9] + ((srcPix[1 + y] - topLeft) >> 1));
+            }
+
+            block = Sse2.LoadVector128(b);
+        }
+
+        if (m < 16)
+        {
+            block = Ssse3.Shuffle(block, Transpose4x4Bytes);
+        }
+
+        var rows = block.AsUInt32();
+        *(uint*)dst = rows.ToScalar();
+        *(uint*)(dst + dstStride) = rows.GetElement(1);
+        *(uint*)(dst + (2 * dstStride)) = rows.GetElement(2);
+        *(uint*)(dst + (3 * dstStride)) = rows.GetElement(3);
+    }
 
     // all_angs_pred for 4x4 (never filtered): a mode's block is one vector, the two-tap pairs of rows 0-1 and 2-3 gathered
     // from the 16-byte frame by pshufb (AllAngs4Index, x265's reference projection included) and weighted by pmaddubsw

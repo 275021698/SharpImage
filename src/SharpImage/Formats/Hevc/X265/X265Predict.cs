@@ -242,8 +242,7 @@ internal unsafe class X265Predict
 
         if (numIntraNeighbor == 0)
         {
-            for (uint i = 0; i < refSize; i++) dst[i] = dcValue;
-            for (uint i = 0; i < refSize - 1; i++) dst[i + refSize] = dcValue;
+            FillPixels(dst, (int)((2 * refSize) - 1), dcValue);
         }
         else if (numIntraNeighbor == totalUnits)
         {
@@ -265,8 +264,10 @@ internal unsafe class X265Predict
                 int unitWidth = intraNeighbors.unitWidth;
                 int unitHeight = intraNeighbors.unitHeight;
                 int totalSamples = (leftUnits * unitHeight) + ((aboveUnits + 1) * unitWidth);
-                pixel* adiLineBuffer = stackalloc pixel[5 * MAX_CU_SIZE];
-                for (int i = 0; i < totalSamples; i++) adiLineBuffer[i] = dcValue;
+                // (16 samples of padding before it: the reversed copy of a 4x4 TU's 8 left samples reads 16)
+                pixel* adiLineMem = stackalloc pixel[(5 * MAX_CU_SIZE) + 16];
+                pixel* adiLineBuffer = adiLineMem + 16;
+                FillPixels(adiLineBuffer, totalSamples, dcValue);
 
                 // top-left sample
                 pixel* adiTemp = adiOrigin - picStride - 1;
@@ -336,15 +337,42 @@ internal unsafe class X265Predict
                     }
                 }
 
-                // copy the processed samples
+                // copy the processed samples (the left ones reversed)
                 adi = adiLineBuffer + refSize + unitWidth - 2;
                 X265Primitives.CopyBytes(dst, adi, refSize * sizeof(pixel));
                 adi = adiLineBuffer + refSize - 1;
-                for (int i = 0; i < (int)refSize - 1; i++)
+#if !HIGH_BIT_DEPTH
+                if (System.Runtime.Intrinsics.X86.Ssse3.IsSupported)
                 {
-                    dst[i + refSize] = adi[-(i + 1)];
+                    // 16 at a time: dst[refSize + i .. + 15] = adi[-(i + 16) .. -(i + 1)] reversed
+                    var reverse = System.Runtime.Intrinsics.Vector128.Create((byte)15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+                    for (int i = 0; i < (int)refSize - 1; i += 16)
+                    {
+                        var v = System.Runtime.Intrinsics.X86.Sse2.LoadVector128(adi - (i + 16));
+                        System.Runtime.Intrinsics.X86.Sse2.Store(dst + refSize + i, System.Runtime.Intrinsics.X86.Ssse3.Shuffle(v, reverse));
+                    }
+                }
+                else
+#endif
+                {
+                    for (int i = 0; i < (int)refSize - 1; i++)
+                    {
+                        dst[i + refSize] = adi[-(i + 1)];
+                    }
                 }
             }
+        }
+    }
+
+    // n samples of one value (the buffers it fills have room for the vector stores' 15-sample overrun)
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+    private static void FillPixels(pixel* p, int n, pixel v)
+    {
+        var vv = System.Runtime.Intrinsics.Vector128.Create(v);
+        int step = 16 / sizeof(pixel);
+        for (int i = 0; i < n; i += step)
+        {
+            System.Runtime.Intrinsics.Vector128.Store(vv, p + i);
         }
     }
 
