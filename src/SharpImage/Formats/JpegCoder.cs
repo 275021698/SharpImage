@@ -1222,10 +1222,17 @@ public static partial class JpegCoder
 
                 mcuCount++;
             }
+
+            t_onMcuRow?.Invoke(mcuRow, components, quantTables, mcuCols);
         }
 
         stream.Position = bits.Position - seg.Offset;
     }
+
+    // called after each MCU row of a baseline scan (on the decoding thread; StartRawYuvStream's IDCT)
+    private delegate void McuRowHandler(int mcuRow, JpegComponent[] components, int[][] quantTables, int mcuCols);
+
+    [ThreadStatic] private static McuRowHandler? t_onMcuRow;
 
     // DecodeBlock's coefficients into a freshly allocated (zero) block
     private static void DecodeBlockFast(ref JpegFastBits reader, int[] block, ref int dcPredictor, HuffmanTable dcTable, HuffmanTable acTable)

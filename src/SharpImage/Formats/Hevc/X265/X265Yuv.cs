@@ -121,6 +121,23 @@ internal sealed unsafe class X265PicYuv
     public void CopyFromPicture(ReadOnlySpan<pixel> y, ReadOnlySpan<pixel> u, ReadOnlySpan<pixel> v, int srcStride, int srcStrideC,
         int padx, int pady)
     {
+        int height = m_picHeight - pady;
+        fixed (pixel* ys = y, us = u, vs = v)
+        {
+            pixel* yp = ys, up = us, vp = vs;
+            // bands of 64 luma rows in parallel, then the bottom edge
+            System.Threading.Tasks.Parallel.For(0, (height + 63) / 64, band =>
+                CopySourceRows(yp, up, vp, srcStride, srcStrideC, padx, pady, band * 64, Math.Min(height, (band + 1) * 64), bottom: false));
+            CopySourceRows(yp, up, vp, srcStride, srcStrideC, padx, pady, height, height, bottom: true);
+        }
+    }
+
+    /// <summary>
+    /// The source luma rows [<paramref name="row0"/>, <paramref name="row1"/>) and their chroma rows with the right edge
+    /// extension (copyFromPicture's), then with <paramref name="bottom"/> the bottom edge extension (after the last row).
+    /// </summary>
+    public void CopySourceRows(pixel* y, pixel* u, pixel* v, int srcStride, int srcStrideC, int padx, int pady, int row0, int row1, bool bottom)
+    {
         int width = m_picWidth - padx;
         int height = m_picHeight - pady;
         int rem = width & 15;
@@ -129,68 +146,50 @@ internal sealed unsafe class X265PicYuv
         pady = rem != 0 ? 16 - rem : pady;
         padx++;
         pady++;
-
-        pixel* Y = m_picOrg[0];
         bool chroma = m_picCsp != X265_CSP_I400;
-        int cwid = width >> m_hChromaShift;
+        int cw = width >> m_hChromaShift;
         int cpadx = padx >> m_hChromaShift;
-        long stride = m_stride, strideC = m_strideC;
-        pixel* org1 = chroma ? m_picOrg[1] : null, org2 = chroma ? m_picOrg[2] : null;
-        int vShift = m_vChromaShift;
-        fixed (pixel* ys = y, us = u, vs = v)
+        for (int r = row0; r < row1; r++)
         {
-            pixel* yp = ys, up = us, vp = vs;
-            // the rows (and their right edge extensions) in bands of 64 luma rows
-            System.Threading.Tasks.Parallel.For(0, (height + 63) / 64, band =>
+            pixel* dst = m_picOrg[0] + (r * m_stride);
+            new ReadOnlySpan<pixel>(y + ((long)r * srcStride), width).CopyTo(new Span<pixel>(dst, width));
+            for (int x = 0; x < padx; x++)
             {
-                for (int r = band * 64; r < Math.Min(height, (band + 1) * 64); r++)
-                {
-                    pixel* dst = Y + (r * stride);
-                    new ReadOnlySpan<pixel>(yp + ((long)r * srcStride), width).CopyTo(new Span<pixel>(dst, width));
-                    for (int x = 0; x < padx; x++)
-                    {
-                        dst[width + x] = dst[width - 1];
-                    }
-                }
-
-                if (chroma)
-                {
-                    for (int r = (band * 64) >> vShift; r < Math.Min(height >> vShift, ((band + 1) * 64) >> vShift); r++)
-                    {
-                        new ReadOnlySpan<pixel>(up + ((long)r * srcStrideC), cwid).CopyTo(new Span<pixel>(org1 + (r * strideC), cwid));
-                        new ReadOnlySpan<pixel>(vp + ((long)r * srcStrideC), cwid).CopyTo(new Span<pixel>(org2 + (r * strideC), cwid));
-                    }
-                }
-            });
+                dst[width + x] = dst[width - 1];
+            }
         }
 
-        Y += (long)height * m_stride;
+        if (chroma)
+        {
+            for (int r = row0 >> m_vChromaShift; r < row1 >> m_vChromaShift; r++)
+            {
+                pixel* du = m_picOrg[1] + (r * m_strideC);
+                pixel* dv = m_picOrg[2] + (r * m_strideC);
+                new ReadOnlySpan<pixel>(u + ((long)r * srcStrideC), cw).CopyTo(new Span<pixel>(du, cw));
+                new ReadOnlySpan<pixel>(v + ((long)r * srcStrideC), cw).CopyTo(new Span<pixel>(dv, cw));
+                for (int x = 0; x < cpadx; x++)
+                {
+                    du[cw + x] = du[cw - 1];
+                    dv[cw + x] = dv[cw - 1];
+                }
+            }
+        }
 
-        Y = m_picOrg[0] + ((long)(height - 1) * m_stride);
+        if (!bottom)
+        {
+            return;
+        }
+
+        pixel* Y = m_picOrg[0] + ((long)(height - 1) * m_stride);
         for (int i = 1; i <= pady; i++)
         {
             Buffer.MemoryCopy(Y, Y + ((long)i * m_stride), (width + padx) * sizeof(pixel), (width + padx) * sizeof(pixel));
         }
 
-        if (m_picCsp != X265_CSP_I400)
+        if (chroma)
         {
-            pixel* U = m_picOrg[1];
-            pixel* V = m_picOrg[2];
-            int cw = width >> m_hChromaShift;
-            for (int r = 0; r < height >> m_vChromaShift; r++)
-            {
-                for (int x = 0; x < padx >> m_hChromaShift; x++)
-                {
-                    U[cw + x] = U[cw - 1];
-                    V[cw + x] = V[cw - 1];
-                }
-
-                U += m_strideC;
-                V += m_strideC;
-            }
-
-            U = m_picOrg[1] + ((long)((height >> m_vChromaShift) - 1) * m_strideC);
-            V = m_picOrg[2] + ((long)((height >> m_vChromaShift) - 1) * m_strideC);
+            pixel* U = m_picOrg[1] + ((long)((height >> m_vChromaShift) - 1) * m_strideC);
+            pixel* V = m_picOrg[2] + ((long)((height >> m_vChromaShift) - 1) * m_strideC);
             int n = (width + padx) >> m_hChromaShift;
             for (int j = 1; j <= pady >> m_vChromaShift; j++)
             {

@@ -29,8 +29,35 @@ public static partial class HeifCoder
         int orientation = exif != null ? ExifOrientation(exif) : 1;
         if (orientation is < 1 or > 8) orientation = 1;
 
-        var raw = JpegCoder.ReadRawYuv(jpeg);
         int q = Math.Clamp(options.Quality, 0, 100);
+
+        // a baseline JPEG's planes are decoded while x265 codes the rows they already hold (the same planes as below,
+        // else that path)
+        if (JpegCoder.StartRawYuvStream(jpeg) is { } js)
+        {
+            try
+            {
+                bool mono = js.Layout == Av1.Av1PixelLayout.I400;
+                int chroma = js.Layout switch
+                {
+                    Av1.Av1PixelLayout.I400 => 0,
+                    Av1.Av1PixelLayout.I420 => 1,
+                    Av1.Av1PixelLayout.I422 => 2,
+                    _ => 3,
+                };
+                byte[] heic = Hevc.HeicEncoder.EncodeYuv(js.Planes[0], mono ? null : js.Planes[1], mono ? null : js.Planes[2], chroma,
+                    null, js.Width, js.Height, colorDescription: false, q, options.Qp, 1, 13, icc, exif, xmp, orientation, js.WaitRows);
+                if (js.Succeeded())
+                {
+                    return heic;
+                }
+            }
+            catch (JpegStreamFailedException)
+            {
+            }
+        }
+
+        var raw = JpegCoder.ReadRawYuv(jpeg);
         if (raw != null)
         {
             bool mono = raw.Layout == Av1.Av1PixelLayout.I400;

@@ -41,6 +41,13 @@ internal sealed class X265EncodeSettings
     public bool FullRange = true;
     public int ColorPrimaries = 1, TransferCharacteristics = 13, MatrixCoefficients = 6;
     public bool WriteColorDescription = true;
+
+    /// <summary>
+    /// When set, the source planes are still being produced: called with a number of luma rows (with their chroma rows),
+    /// it returns once that many are in the planes. Each CTU row's source band is then copied (and its AQ computed) just
+    /// before the row is analysed. The output does not depend on it.
+    /// </summary>
+    public Action<int>? WaitSourceRows;
 }
 
 [System.Runtime.CompilerServices.SkipLocalsInit]
@@ -221,7 +228,11 @@ internal static unsafe class X265Encoder
         frame.m_fencPic.CreateOffsets(arena, (int)sps.numCuInWidth, (int)sps.numCuInHeight, p.maxCUSize, p.unitSizeDepth);
         frame.m_reconPic = new X265PicYuv(arena, p.sourceWidth, p.sourceHeight, p.internalCsp, p.maxCUSize);
         frame.m_reconPic.ShareOffsets(frame.m_fencPic);
-        frame.m_fencPic.CopyFromPicture(y, u, v, strideY, strideC, conf.rightOffset, conf.bottomOffset);
+        Action<int>? waitRows = s.WaitSourceRows;
+        if (waitRows == null)
+        {
+            frame.m_fencPic.CopyFromPicture(y, u, v, strideY, strideC, conf.rightOffset, conf.bottomOffset);
+        }
         frame.m_picCTU = X265CuData.CreateCTUs(arena, sps.numCUsInFrame, p.internalCsp, (uint)p.num4x4Partitions, (uint)p.maxCUSize, (uint)p.unitSizeDepth);
 
         frame.m_cuStatBaseQp = new double[sps.numCUsInFrame];
@@ -231,7 +242,7 @@ internal static unsafe class X265Encoder
         }
 
         // adaptive quantization offsets (lookahead)
-        double[]? qpAqOffset = p.aqMode != 0 ? CalcAdaptiveQuantFrame(frame.m_fencPic, p) : null;
+        double[]? qpAqOffset = p.aqMode == 0 ? null : waitRows == null ? CalcAdaptiveQuantFrame(frame.m_fencPic, p) : NewAqOffsets(frame.m_fencPic, p);
 
         // rate control: the QP of the first (I) frame
         double avgQp;
@@ -260,7 +271,29 @@ internal static unsafe class X265Encoder
         var bs = new X265Bitstream();
         var entropy = new X265Entropy(arena);
         GetStreamHeaders(nalList, entropy, bs, vps, sps, pps, p);
-        CompressFrame(arena, frame, qpAqOffset, nalList, bs, entropy);
+        fixed (pixel* yp = y, up = u, vp = v)
+        {
+            // a streamed source: each CTU row's band, its edges and its AQ offsets just before its analysis
+            Action<uint>? prepareRow = null;
+            if (waitRows != null)
+            {
+                pixel* ys = yp, us = up, vs = vp;
+                int srcHeight = p.sourceHeight - conf.bottomOffset, ctu = p.maxCUSize;
+                uint lastRow = sps.numCuInHeight - 1;
+                prepareRow = row =>
+                {
+                    int r0 = (int)row * ctu, r1 = Math.Min(srcHeight, r0 + ctu);
+                    waitRows(r1);
+                    frame.m_fencPic.CopySourceRows(ys, us, vs, strideY, strideC, conf.rightOffset, conf.bottomOffset, r0, r1, row == lastRow);
+                    if (qpAqOffset != null)
+                    {
+                        CalcAdaptiveQuantRows(frame.m_fencPic, p, qpAqOffset, r0, row == lastRow ? int.MaxValue : r0 + ctu);
+                    }
+                };
+            }
+
+            CompressFrame(arena, frame, qpAqOffset, nalList, bs, entropy, prepareRow);
+        }
 
         var result = new List<(int, byte[])>();
         foreach ((int type, byte[] data) in nalList.Nals)
@@ -520,27 +553,50 @@ internal static unsafe class X265Encoder
         int blocksX = (maxCol + loopIncr - 1) / loopIncr;
         int blocksY = (maxRow + loopIncr - 1) / loopIncr;
         var qpAqOffset = new double[blocksX * blocksY];
-        double strength = p.aqStrength * 1.0397f;
         // each block independent: rows of blocks in parallel
-        System.Threading.Tasks.Parallel.For(0, blocksY, by =>
-        {
-            int blockY = by * loopIncr;
-            int blockXY = by * blocksX;
-            for (int blockX = 0; blockX < maxCol; blockX += loopIncr)
-            {
-                uint energy = AcEnergyCu(fenc, blockX, blockY, p.internalCsp, p.qgSize);
-                double qpAdj = strength * (Math.Log2(Math.Max(energy, 1)) - (double)(modeOneConst + (2 * (X265_DEPTH - 8))));
-                qpAqOffset[blockXY++] = qpAdj;
-            }
-        });
-
+        System.Threading.Tasks.Parallel.For(0, blocksY, by => CalcAdaptiveQuantBlockRow(fenc, p, qpAqOffset, by));
         return qpAqOffset;
+    }
+
+    // the AQ offsets array of a picture, filled per CTU row (CalcAdaptiveQuantRows)
+    private static double[] NewAqOffsets(X265PicYuv fenc, X265Param p)
+    {
+        int loopIncr = p.qgSize == 8 ? 8 : 16;
+        return new double[((fenc.m_picWidth + loopIncr - 1) / loopIncr) * ((fenc.m_picHeight + loopIncr - 1) / loopIncr)];
+    }
+
+    // the AQ offsets of the block rows starting in luma rows [row0, row1)
+    private static void CalcAdaptiveQuantRows(X265PicYuv fenc, X265Param p, double[] qpAqOffset, int row0, int row1)
+    {
+        int loopIncr = p.qgSize == 8 ? 8 : 16;
+        int blocksY = (fenc.m_picHeight + loopIncr - 1) / loopIncr;
+        for (int by = row0 / loopIncr; by < blocksY && by * loopIncr < row1; by++)
+        {
+            CalcAdaptiveQuantBlockRow(fenc, p, qpAqOffset, by);
+        }
+    }
+
+    private static void CalcAdaptiveQuantBlockRow(X265PicYuv fenc, X265Param p, double[] qpAqOffset, int by)
+    {
+        int maxCol = fenc.m_picWidth;
+        int loopIncr = p.qgSize == 8 ? 8 : 16;
+        float modeOneConst = p.qgSize == 8 ? 11.427f : 14.427f;
+        int blocksX = (maxCol + loopIncr - 1) / loopIncr;
+        double strength = p.aqStrength * 1.0397f;
+        int blockY = by * loopIncr;
+        int blockXY = by * blocksX;
+        for (int blockX = 0; blockX < maxCol; blockX += loopIncr)
+        {
+            uint energy = AcEnergyCu(fenc, blockX, blockY, p.internalCsp, p.qgSize);
+            double qpAdj = strength * (Math.Log2(Math.Max(energy, 1)) - (double)(modeOneConst + (2 * (X265_DEPTH - 8))));
+            qpAqOffset[blockXY++] = qpAdj;
+        }
     }
 
     // ---- frame encoder ----
 
     private static void CompressFrame(X265Arena arena, X265FrameData frame, double[]? qpAqOffset, X265NalList nalList, X265Bitstream bs,
-        X265Entropy entropyCoder)
+        X265Entropy entropyCoder, Action<uint>? prepareRow)
     {
         X265Param p = frame.m_param;
         X265Slice slice = frame.m_slice;
@@ -673,6 +729,7 @@ internal static unsafe class X265Encoder
 
         void AnalyseRow(uint row, X265Analysis analysis)
         {
+            prepareRow?.Invoke(row);
             X265Entropy rowCoder = rowCoders[row];
             bool bFirstRowInSlice = row == 0;
             bool bLastRowInSlice = row == numRows - 1;

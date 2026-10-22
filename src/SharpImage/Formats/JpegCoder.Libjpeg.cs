@@ -13,6 +13,72 @@ internal sealed class JpegComponents
     public required bool IsRgb;
 }
 
+/// <summary>JPEG planes being produced (<see cref="JpegCoder.StartRawYuvStream"/>).</summary>
+internal sealed class JpegYuvStream
+{
+    public required byte[][] Planes;
+    public required int Width, Height;
+    public required Av1.Av1PixelLayout Layout;
+    private readonly object gate = new();
+    private int rowsReady;
+    private bool done;
+    private Exception? failure;
+
+    internal int RowsReady => Volatile.Read(ref rowsReady);
+
+    /// <summary>Returns once the planes hold the first <paramref name="rows"/> luma rows (and their chroma rows); throws
+    /// <see cref="JpegStreamFailedException"/> when the decode failed first.</summary>
+    public void WaitRows(int rows)
+    {
+        if (Volatile.Read(ref rowsReady) >= rows) return;
+        lock (gate)
+        {
+            while (rowsReady < rows && failure == null && !done) Monitor.Wait(gate);
+            if (rowsReady < rows) throw new JpegStreamFailedException(failure);
+        }
+    }
+
+    /// <summary>Waits for the decode to end: true when the planes are ReadRawYuv's.</summary>
+    public bool Succeeded()
+    {
+        lock (gate)
+        {
+            while (!done && failure == null) Monitor.Wait(gate);
+            return failure == null;
+        }
+    }
+
+    internal void Publish(int rows)
+    {
+        lock (gate)
+        {
+            Volatile.Write(ref rowsReady, rows);
+            Monitor.PulseAll(gate);
+        }
+    }
+
+    internal void Finish()
+    {
+        lock (gate)
+        {
+            done = true;
+            Monitor.PulseAll(gate);
+        }
+    }
+
+    internal void Fail(Exception e)
+    {
+        lock (gate)
+        {
+            failure = e;
+            Monitor.PulseAll(gate);
+        }
+    }
+}
+
+/// <summary>The JPEG decode behind a <see cref="JpegYuvStream"/> failed.</summary>
+internal sealed class JpegStreamFailedException(Exception? inner) : Exception("The JPEG decode failed.", inner);
+
 public static partial class JpegCoder
 {
     /// <summary>
@@ -65,6 +131,132 @@ public static partial class JpegCoder
             MaxH = d.MaxHSample, MaxV = d.MaxVSample, Width = d.Width, Height = d.Height,
             IsRgb = n == 3 && !IsYCbCr(jpeg, start, d),
         };
+    }
+
+    /// <summary>
+    /// <see cref="ReadRawYuv"/> of a baseline JPEG produced on a background thread while the caller goes on: the planes
+    /// are allocated at once and filled MCU row by MCU row (<see cref="JpegYuvStream.WaitRows"/>). Null when the file is
+    /// not one ReadRawYuv takes as raw planes from its frame header (then use ReadRawYuv). The planes are ReadRawYuv's
+    /// only when <see cref="JpegYuvStream.Succeeded"/>: on false the caller must not use them.
+    /// </summary>
+    internal static JpegYuvStream? StartRawYuvStream(byte[] jpeg)
+    {
+        var segs = ScanSegments(jpeg, 0);
+        int sofAt = -1, sofLen = 0, sofMarker = 0;
+        foreach (var (marker, off, len) in segs)
+        {
+            if (marker is >= 0xC0 and <= 0xCF and not 0xC4 and not 0xC8 and not 0xCC)
+            {
+                if (sofAt >= 0) return null;   // a second frame header
+                (sofAt, sofLen, sofMarker) = (off, len, marker);
+            }
+        }
+
+        if (sofAt < 0 || sofMarker is not (0xC0 or 0xC1) || sofLen < 6) return null;
+        int height = (jpeg[sofAt + 1] << 8) | jpeg[sofAt + 2], width = (jpeg[sofAt + 3] << 8) | jpeg[sofAt + 4], n = jpeg[sofAt + 5];
+        if (jpeg[sofAt] != 8 || width == 0 || height == 0 || n is not (1 or 3) || sofLen < 6 + (3 * n)) return null;
+        int[] ids = new int[n], hs = new int[n], vs = new int[n];
+        int maxH = 1, maxV = 1;
+        for (int c = 0; c < n; c++)
+        {
+            ids[c] = jpeg[sofAt + 6 + (3 * c)];
+            hs[c] = jpeg[sofAt + 7 + (3 * c)] >> 4;
+            vs[c] = jpeg[sofAt + 7 + (3 * c)] & 15;
+            if (hs[c] is < 1 or > 4 || vs[c] is < 1 or > 4) return null;
+            maxH = Math.Max(maxH, hs[c]);
+            maxV = Math.Max(maxV, vs[c]);
+        }
+
+        Av1.Av1PixelLayout layout = Av1.Av1PixelLayout.I400;
+        if (n == 3)
+        {
+            // ReadRawYuv's layouts (YCbCr, chroma not subsampled further than luma), IsYCbCr from the frame header's ids
+            bool jfif = false;
+            int adobe = -1;
+            foreach (var (marker, off, len) in segs)
+            {
+                if (marker == 0xE0 && len >= 5 && jpeg.AsSpan(off, 5).SequenceEqual("JFIF\0"u8)) jfif = true;
+                if (marker == 0xEE && len >= 12 && jpeg.AsSpan(off, 5).SequenceEqual("Adobe"u8)) adobe = jpeg[off + 11];
+            }
+
+            bool ycbcr = jfif || (adobe >= 0 ? adobe != 0 : !(ids[0] == 'R' && ids[1] == 'G' && ids[2] == 'B'));
+            if (!ycbcr || hs[1] != 1 || vs[1] != 1 || hs[2] != 1 || vs[2] != 1) return null;
+            Av1.Av1PixelLayout? l = (hs[0], vs[0]) switch
+            {
+                (1, 1) => Av1.Av1PixelLayout.I444,
+                (2, 1) => Av1.Av1PixelLayout.I422,
+                (2, 2) => Av1.Av1PixelLayout.I420,
+                _ => null,
+            };
+            if (l == null) return null;
+            layout = l.Value;
+        }
+
+        var planes = new byte[n][];
+        int[] pws = new int[n], phs = new int[n];
+        for (int c = 0; c < n; c++)
+        {
+            pws[c] = (width * hs[c] + maxH - 1) / maxH;
+            phs[c] = (height * vs[c] + maxV - 1) / maxV;
+            planes[c] = new byte[pws[c] * phs[c]];
+        }
+
+        var stream = new JpegYuvStream { Planes = planes, Width = width, Height = height, Layout = layout };
+        var thread = new System.Threading.Thread(() =>
+        {
+            int mcuHeight = maxV * 8;
+            t_onMcuRow = (mcuRow, comps, qts, mcuCols) =>
+            {
+                // ReadComponents' IDCT of this MCU row's block rows
+                Span<byte> block = stackalloc byte[64];
+                for (int c = 0; c < n; c++)
+                {
+                    var comp = comps[c];
+                    int[] qt = qts[comp.QuantTableIndex] ?? throw new InvalidDataException("JPEG quantization table missing.");
+                    int pw = pws[c], ph = phs[c], bw = (pw + 7) / 8, bh = (ph + 7) / 8, blocksPerRow = mcuCols * comp.HSample;
+                    byte[] plane = planes[c];
+                    for (int by = mcuRow * comp.VSample; by < Math.Min(bh, (mcuRow + 1) * comp.VSample); by++)
+                    {
+                        for (int bx = 0; bx < bw; bx++)
+                        {
+                            IdctIslow(comp.Blocks[by * blocksPerRow + bx], qt, block);
+                            int rows = Math.Min(8, ph - (by * 8)), cols = Math.Min(8, pw - (bx * 8));
+                            for (int y = 0; y < rows; y++)
+                            {
+                                block.Slice(y * 8, cols).CopyTo(plane.AsSpan(((by * 8) + y) * pw + (bx * 8), cols));
+                            }
+                        }
+                    }
+                }
+
+                stream.Publish(Math.Min(height, (mcuRow + 1) * mcuHeight));
+            };
+            try
+            {
+                var d = ReadDctData(new MemoryStream(jpeg));
+                // the frame ReadComponents would have read (and all its rows)
+                bool same = !d.Progressive && d.ComponentCount == n && d.Width == width && d.Height == height
+                    && d.MaxHSample == maxH && d.MaxVSample == maxV && stream.RowsReady >= height;
+                for (int c = 0; same && c < n; c++)
+                {
+                    same = d.Components[c].Id == ids[c] && d.Components[c].HSample == hs[c] && d.Components[c].VSample == vs[c]
+                        && d.QuantTables[d.Components[c].QuantTableIndex] != null;
+                }
+
+                if (!same) throw new InvalidDataException("JPEG frame differs from its header.");
+                stream.Finish();
+            }
+            catch (Exception e)
+            {
+                stream.Fail(e);
+            }
+            finally
+            {
+                t_onMcuRow = null;
+            }
+        }, 16 * 1024 * 1024) { IsBackground = true, Name = "JPEG planes" };
+        thread.Start();
+        return stream;
     }
 
     /// <summary>The JPEG starting at <paramref name="start"/> decoded to RGB exactly as libjpeg-turbo's default

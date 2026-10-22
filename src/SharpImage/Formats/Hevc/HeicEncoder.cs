@@ -57,12 +57,20 @@ internal static class HeicEncoder
     /// Encodes 8-bit planes (tightly packed: luma width x height, chroma at the chroma format's size; chromaFormat
     /// 0 = 4:0:0, 1 = 4:2:0) as libheif encodes a YCbCr / monochrome image. <paramref name="colorDescription"/>: whether
     /// the image carries an nclx (written to the HEVC VUI; libheif's own conversions attach one, a JPEG's raw planes
-    /// and gray images have none).
+    /// and gray images have none). <paramref name="waitSourceRows"/>: the planes are still being written (see
+    /// X265EncodeSettings.WaitSourceRows); the encode overlaps with that where it can.
     /// </summary>
     public static byte[] EncodeYuv(byte[] y, byte[]? cb, byte[]? cr, int chromaFormat, byte[]? alpha, int width, int height,
         bool colorDescription, int quality, int? constantQp, int colorPrimaries = 1, int transferCharacteristics = 13,
-        byte[]? icc = null, byte[]? exif = null, byte[]? xmp = null, int orientation = 1)
+        byte[]? icc = null, byte[]? exif = null, byte[]? xmp = null, int orientation = 1, Action<int>? waitSourceRows = null)
     {
+        // the conversions below and an alpha plane need the whole picture
+        if (waitSourceRows != null && (chromaFormat is 2 or 3 || alpha != null))
+        {
+            waitSourceRows(height);
+            waitSourceRows = null;
+        }
+
         // libheif's x265 plugin codes 4:2:0: libheif's colour conversion pipeline brings 4:4:4 there with its averaging
         // filter and 4:2:2 through RGB, and the converted image carries the output nclx
         if (chromaFormat == 3)
@@ -80,14 +88,14 @@ internal static class HeicEncoder
 
         if (chromaFormat is not (0 or 1)) throw new ArgumentOutOfRangeException(nameof(chromaFormat));
         return EncodePlanes(y, cb, cr, chromaFormat == 0, alpha, width, height, 8, colorDescription, quality, constantQp,
-            colorPrimaries, transferCharacteristics, icc, exif, xmp, orientation, Encode8);
+            colorPrimaries, transferCharacteristics, icc, exif, xmp, orientation, Encode8, waitSourceRows);
 
         static List<(int Type, byte[] Payload)> Encode8(byte[] y, byte[]? u, byte[]? v, int pw, int ph, PictureSettings s)
             => X265Encoder.EncodePicture(y, u, v, pw, ph, pw, pw >> 1, new X265EncodeSettings
             {
                 Quality = s.Quality, ConstantQp = s.ConstantQp, CtuSize = s.CtuSize, Monochrome = s.Monochrome,
                 WriteColorDescription = s.ColorDescription, ColorPrimaries = s.ColorPrimaries,
-                TransferCharacteristics = s.TransferCharacteristics, MatrixCoefficients = 6,
+                TransferCharacteristics = s.TransferCharacteristics, MatrixCoefficients = 6, WaitSourceRows = s.WaitSourceRows,
             });
     }
 
@@ -134,12 +142,13 @@ internal static class HeicEncoder
 
     // What libheif's x265 plugin sets per picture.
     private readonly record struct PictureSettings(int Quality, int? ConstantQp, int CtuSize, bool Monochrome, bool ColorDescription,
-        int ColorPrimaries, int TransferCharacteristics);
+        int ColorPrimaries, int TransferCharacteristics, Action<int>? WaitSourceRows = null);
 
     // The colour item (4:0:0 / 4:2:0 planes) and the alpha item through x265 as libheif's plugin drives it, then the container.
     private static byte[] EncodePlanes<T>(T[] y, T[]? cb, T[]? cr, bool mono, T[]? alpha, int width, int height, int bitDepth,
         bool colorDescription, int quality, int? constantQp, int colorPrimaries, int transferCharacteristics, byte[]? icc,
-        byte[]? exif, byte[]? xmp, int orientation, Func<T[], T[]?, T[]?, int, int, PictureSettings, List<(int Type, byte[] Payload)>> encode)
+        byte[]? exif, byte[]? xmp, int orientation, Func<T[], T[]?, T[]?, int, int, PictureSettings, List<(int Type, byte[] Payload)>> encode,
+        Action<int>? waitSourceRows = null)
     {
         // libheif's x265 plugin: the picture is the rounded size (even, at least 64), edge-replicated, and the CTU size
         // halves from 64 while the image is smaller than it
@@ -147,7 +156,14 @@ internal static class HeicEncoder
         int ctu = 64;
         while (ctu > 16 && (width < ctu || height < ctu)) ctu >>= 1;
 
-        var settings = new PictureSettings(quality, constantQp, ctu, mono, colorDescription, colorPrimaries, transferCharacteristics);
+        // a streamed source goes to x265 as it is when it needs no padding, else once complete
+        if (waitSourceRows != null && (pw != width || ph != height))
+        {
+            waitSourceRows(height);
+            waitSourceRows = null;
+        }
+
+        var settings = new PictureSettings(quality, constantQp, ctu, mono, colorDescription, colorPrimaries, transferCharacteristics, waitSourceRows);
         T[] py = Pad(y, width, height, pw, ph);
         List<(int Type, byte[] Payload)> colorNals;
         if (mono)
@@ -164,7 +180,7 @@ internal static class HeicEncoder
         if (alpha != null)
         {
             alphaNals = encode(Pad(alpha, width, height, pw, ph), null, null, pw, ph,
-                settings with { Monochrome = true, ColorDescription = false, ColorPrimaries = 1, TransferCharacteristics = 13 });
+                settings with { Monochrome = true, ColorDescription = false, ColorPrimaries = 1, TransferCharacteristics = 13, WaitSourceRows = null });
         }
 
         // MIAF 7.3.6.7 (without Amd2): a YCbCr image whose size is not a multiple of the chroma subsampling is not MIAF
@@ -188,9 +204,14 @@ internal static class HeicEncoder
         System.Threading.Tasks.Parallel.For(0, (count + chunk - 1) / chunk, i => body(i * chunk, Math.Min(count, (i + 1) * chunk)));
     }
 
-    // A tightly packed w x h plane, edge-replicated to pw x ph.
+    // A tightly packed w x h plane, edge-replicated to pw x ph (the plane itself when that is its size).
     private static T[] Pad<T>(T[] src, int w, int h, int pw, int ph)
     {
+        if (w == pw && h == ph && src.Length == pw * ph)
+        {
+            return src;
+        }
+
         var p = new T[pw * ph];
         for (int r = 0; r < h; r++)
         {
