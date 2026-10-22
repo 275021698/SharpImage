@@ -297,6 +297,45 @@ internal static unsafe partial class X265Primitives
         }
     }
 
+    /// <summary>memcpy of n bytes (non-overlapping) without a call: 16-byte chunks and an overlapping tail.</summary>
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+    internal static void CopyBytes(void* dst, void* src, long n)
+    {
+        byte* d = (byte*)dst, s = (byte*)src;
+        if (n >= 16)
+        {
+            long i = 0;
+            for (; i + 16 <= n; i += 16)
+            {
+                System.Runtime.Intrinsics.Vector128.Store(System.Runtime.Intrinsics.Vector128.Load(s + i), d + i);
+            }
+
+            if (i < n)
+            {
+                System.Runtime.Intrinsics.Vector128.Store(System.Runtime.Intrinsics.Vector128.Load(s + n - 16), d + n - 16);
+            }
+        }
+        else if (n >= 8)
+        {
+            *(ulong*)d = *(ulong*)s;
+            *(ulong*)(d + n - 8) = *(ulong*)(s + n - 8);
+        }
+        else if (n >= 4)
+        {
+            *(uint*)d = *(uint*)s;
+            *(uint*)(d + n - 4) = *(uint*)(s + n - 4);
+        }
+        else if (n >= 2)
+        {
+            *(ushort*)d = *(ushort*)s;
+            *(ushort*)(d + n - 2) = *(ushort*)(s + n - 2);
+        }
+        else if (n == 1)
+        {
+            *d = *s;
+        }
+    }
+
     internal static void CopyPSScalar(short* dst, long dstStride, pixel* src, long srcStride, int n)
     {
         for (int y = 0; y < n; y++)

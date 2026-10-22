@@ -248,7 +248,7 @@ internal unsafe class X265Predict
         else if (numIntraNeighbor == totalUnits)
         {
             pixel* adiTemp = adiOrigin - picStride - 1;
-            Buffer.MemoryCopy(adiTemp, dst, refSize * sizeof(pixel), refSize * sizeof(pixel));
+            X265Primitives.CopyBytes(dst, adiTemp, refSize * sizeof(pixel));
             adiTemp = adiOrigin - 1;
             for (uint i = 0; i < refSize - 1; i++)
             {
@@ -289,7 +289,7 @@ internal unsafe class X265Predict
                 // above and above-right samples
                 adiTemp = adiOrigin - picStride;
                 adi = adiLineBuffer + (leftUnits * unitHeight) + unitWidth;
-                Buffer.MemoryCopy(adiTemp, adi, aboveUnits * unitWidth * sizeof(pixel), aboveUnits * unitWidth * sizeof(pixel));
+                X265Primitives.CopyBytes(adi, adiTemp, aboveUnits * unitWidth * sizeof(pixel));
 
                 // pad the unavailable reference samples
                 int curr = 0;
@@ -338,7 +338,7 @@ internal unsafe class X265Predict
 
                 // copy the processed samples
                 adi = adiLineBuffer + refSize + unitWidth - 2;
-                Buffer.MemoryCopy(adi, dst, refSize * sizeof(pixel), refSize * sizeof(pixel));
+                X265Primitives.CopyBytes(dst, adi, refSize * sizeof(pixel));
                 adi = adiLineBuffer + refSize - 1;
                 for (int i = 0; i < (int)refSize - 1; i++)
                 {

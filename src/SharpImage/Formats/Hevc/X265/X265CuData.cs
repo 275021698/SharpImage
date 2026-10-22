@@ -217,7 +217,7 @@ internal sealed unsafe class X265CuData
                 System.Runtime.Intrinsics.Vector128.Store(System.Runtime.Intrinsics.Vector128.Load(src + 48), dst + 48);
                 return;
             default:
-                Buffer.MemoryCopy(src, dst, n, n);
+                X265Primitives.CopyBytes(dst, src, n);
                 return;
         }
     }
@@ -315,11 +315,11 @@ internal sealed unsafe class X265CuData
         PartCopy(m_tuDepth + offset, subCU.m_tuDepth, q);
         PartCopy(m_transformSkip[0] + offset, subCU.m_transformSkip[0], q);
         PartCopy(m_cbf[0] + offset, subCU.m_cbf[0], q);
-        Buffer.MemoryCopy(subCU.m_distortion, m_distortion + offset, childGeom.numPartitions * sizeof(sse_t), childGeom.numPartitions * sizeof(sse_t));
+        X265Primitives.CopyBytes(m_distortion + offset, subCU.m_distortion, childGeom.numPartitions * sizeof(sse_t));
 
         uint tmp = 1u << (int)((m_slice.m_param.maxLog2CUSize - childGeom.depth) * 2);
         uint tmp2 = subPartIdx * tmp;
-        Buffer.MemoryCopy(subCU.m_trCoeff[0], m_trCoeff[0] + tmp2, tmp * 2, tmp * 2);
+        X265Primitives.CopyBytes(m_trCoeff[0] + tmp2, subCU.m_trCoeff[0], tmp * 2);
 
         if (subCU.m_chromaFormat != X265_CSP_I400)
         {
@@ -330,8 +330,8 @@ internal sealed unsafe class X265CuData
             PartCopy(m_chromaIntraDir + offset, subCU.m_chromaIntraDir, q);
             uint tmpC = tmp >> (m_hChromaShift + m_vChromaShift);
             uint tmpC2 = tmp2 >> (m_hChromaShift + m_vChromaShift);
-            Buffer.MemoryCopy(subCU.m_trCoeff[1], m_trCoeff[1] + tmpC2, tmpC * 2, tmpC * 2);
-            Buffer.MemoryCopy(subCU.m_trCoeff[2], m_trCoeff[2] + tmpC2, tmpC * 2, tmpC * 2);
+            X265Primitives.CopyBytes(m_trCoeff[1] + tmpC2, subCU.m_trCoeff[1], tmpC * 2);
+            X265Primitives.CopyBytes(m_trCoeff[2] + tmpC2, subCU.m_trCoeff[2], tmpC * 2);
         }
     }
 
@@ -367,11 +367,11 @@ internal sealed unsafe class X265CuData
         PartCopy(ctu.m_tuDepth + a, m_tuDepth, n);
         PartCopy(ctu.m_transformSkip[0] + a, m_transformSkip[0], n);
         PartCopy(ctu.m_cbf[0] + a, m_cbf[0], n);
-        Buffer.MemoryCopy(m_distortion, ctu.m_distortion + a, n * sizeof(sse_t), n * sizeof(sse_t));
+        X265Primitives.CopyBytes(ctu.m_distortion + a, m_distortion, n * sizeof(sse_t));
 
         uint tmpY = 1u << (int)((m_slice.m_param.maxLog2CUSize - depth) * 2);
         uint tmpY2 = a << (LOG2_UNIT_SIZE * 2);
-        Buffer.MemoryCopy(m_trCoeff[0], ctu.m_trCoeff[0] + tmpY2, tmpY * 2, tmpY * 2);
+        X265Primitives.CopyBytes(ctu.m_trCoeff[0] + tmpY2, m_trCoeff[0], tmpY * 2);
         if (ctu.m_chromaFormat != X265_CSP_I400)
         {
             PartCopy(ctu.m_transformSkip[1] + a, m_transformSkip[1], n);
@@ -381,8 +381,8 @@ internal sealed unsafe class X265CuData
             PartCopy(ctu.m_chromaIntraDir + a, m_chromaIntraDir, n);
             uint tmpC = tmpY >> (m_hChromaShift + m_vChromaShift);
             uint tmpC2 = tmpY2 >> (m_hChromaShift + m_vChromaShift);
-            Buffer.MemoryCopy(m_trCoeff[1], ctu.m_trCoeff[1] + tmpC2, tmpC * 2, tmpC * 2);
-            Buffer.MemoryCopy(m_trCoeff[2], ctu.m_trCoeff[2] + tmpC2, tmpC * 2, tmpC * 2);
+            X265Primitives.CopyBytes(ctu.m_trCoeff[1] + tmpC2, m_trCoeff[1], tmpC * 2);
+            X265Primitives.CopyBytes(ctu.m_trCoeff[2] + tmpC2, m_trCoeff[2], tmpC * 2);
         }
     }
 

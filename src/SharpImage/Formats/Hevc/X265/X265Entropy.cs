@@ -113,10 +113,19 @@ internal sealed unsafe partial class X265Entropy
     private void CopyFrom(X265Entropy src)
     {
         CopyState(src);
-        Buffer.MemoryCopy(src.m_contextState, m_contextState, MAX_OFF_CTX_MOD, MAX_OFF_CTX_MOD);
+        CopyContextsFrom(src);
     }
 
-    private void CopyContextsFrom(X265Entropy src) => Buffer.MemoryCopy(src.m_contextState, m_contextState, MAX_OFF_CTX_MOD, MAX_OFF_CTX_MOD);
+    // (the whole 160-byte allocation: MAX_OFF_CTX_MOD contexts and the unused tail)
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+    private void CopyContextsFrom(X265Entropy src)
+    {
+        byte* s = src.m_contextState, d = m_contextState;
+        for (int i = 0; i < 160; i += 16)
+        {
+            System.Runtime.Intrinsics.Vector128.Store(System.Runtime.Intrinsics.Vector128.Load(s + i), d + i);
+        }
+    }
 
     public void ResetBits()
     {

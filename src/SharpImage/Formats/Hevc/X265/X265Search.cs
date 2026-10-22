@@ -316,7 +316,7 @@ internal unsafe class X265Search : X265Predict
                 X265Primitives.CopyPP(mode.predYuv.GetLumaAddr(absPartIdx), mode.fencYuv.m_size, kept.pred, (uint)tuSize, tuSize, tuSize);
                 X265Primitives.CopyPP(reconQt, reconQtStride, kept.recon, (uint)tuSize, tuSize, tuSize);
                 uint coeffBytes = 2u << (int)(log2TrSize * 2);
-                Buffer.MemoryCopy(kept.coeff, m_rqt[qtLayer].coeffRQT[0] + (absPartIdx << (LOG2_UNIT_SIZE * 2)), coeffBytes, coeffBytes);
+                X265Primitives.CopyBytes(m_rqt[qtLayer].coeffRQT[0] + (absPartIdx << (LOG2_UNIT_SIZE * 2)), kept.coeff, coeffBytes);
                 m_entropyCoder.Load(kept.entropy);
                 fullCost = kept.cost;
             }
@@ -418,7 +418,7 @@ internal unsafe class X265Search : X265Predict
                     X265Primitives.CopyPP(keep.pred, (uint)tuSize, pred, stride, tuSize, tuSize);
                     X265Primitives.CopyPP(keep.recon, (uint)tuSize, reconQt, reconQtStride, tuSize, tuSize);
                     uint coeffBytes = 2u << (int)(log2TrSize * 2);
-                    Buffer.MemoryCopy(coeffY, keep.coeff, coeffBytes, coeffBytes);
+                    X265Primitives.CopyBytes(keep.coeff, coeffY, coeffBytes);
                     keep.cost = fullCost;
                     keep.cbf = bCBF;
                     m_lumaTuCaptured = true;
@@ -497,7 +497,7 @@ internal unsafe class X265Search : X265Predict
             short* coeffSrcY = m_rqt[qtLayer].coeffRQT[0] + coeffOffsetY;
             short* coeffDestY = cu.m_trCoeff[0] + coeffOffsetY;
             uint bytes = 2u << (int)(log2TrSize * 2);
-            Buffer.MemoryCopy(coeffSrcY, coeffDestY, bytes, bytes);
+            X265Primitives.CopyBytes(coeffDestY, coeffSrcY, bytes);
             m_rqt[qtLayer].reconQtYuv.CopyPartToPartLuma(reconYuv, absPartIdx, log2TrSize);
         }
         else
@@ -627,8 +627,8 @@ internal unsafe class X265Search : X265Predict
             short* coeffSrcV = m_rqt[qtLayer].coeffRQT[2] + coeffOffsetC;
             short* coeffDstU = cu.m_trCoeff[1] + coeffOffsetC;
             short* coeffDstV = cu.m_trCoeff[2] + coeffOffsetC;
-            Buffer.MemoryCopy(coeffSrcU, coeffDstU, numCoeffC * 2, numCoeffC * 2);
-            Buffer.MemoryCopy(coeffSrcV, coeffDstV, numCoeffC * 2, numCoeffC * 2);
+            X265Primitives.CopyBytes(coeffDstU, coeffSrcU, numCoeffC * 2);
+            X265Primitives.CopyBytes(coeffDstV, coeffSrcV, numCoeffC * 2);
             m_rqt[qtLayer].reconQtYuv.CopyPartToPartChroma(reconYuv, absPartIdx, log2TrSizeC + (uint)m_hChromaShift);
         }
         else
@@ -926,10 +926,10 @@ internal unsafe class X265Search : X265Predict
                     bestMode = modeList[mode];
                     ExtractIntraResultChromaQT(cu, reconYuv, absPartIdxC, initTuDepth);
                     uint step = tuIterator.absPartIdxStep;
-                    Buffer.MemoryCopy(cu.m_cbf[1] + absPartIdxC, m_qtTempCbf[1], step, step);
-                    Buffer.MemoryCopy(cu.m_cbf[2] + absPartIdxC, m_qtTempCbf[2], step, step);
-                    Buffer.MemoryCopy(cu.m_transformSkip[1] + absPartIdxC, m_qtTempTransformSkipFlag[1], step, step);
-                    Buffer.MemoryCopy(cu.m_transformSkip[2] + absPartIdxC, m_qtTempTransformSkipFlag[2], step, step);
+                    X265Primitives.CopyBytes(m_qtTempCbf[1], cu.m_cbf[1] + absPartIdxC, step);
+                    X265Primitives.CopyBytes(m_qtTempCbf[2], cu.m_cbf[2] + absPartIdxC, step);
+                    X265Primitives.CopyBytes(m_qtTempTransformSkipFlag[1], cu.m_transformSkip[1] + absPartIdxC, step);
+                    X265Primitives.CopyBytes(m_qtTempTransformSkipFlag[2], cu.m_transformSkip[2] + absPartIdxC, step);
                 }
             }
 
@@ -942,10 +942,10 @@ internal unsafe class X265Search : X265Predict
             }
 
             uint st = tuIterator.absPartIdxStep;
-            Buffer.MemoryCopy(m_qtTempCbf[1], cu.m_cbf[1] + absPartIdxC, st, st);
-            Buffer.MemoryCopy(m_qtTempCbf[2], cu.m_cbf[2] + absPartIdxC, st, st);
-            Buffer.MemoryCopy(m_qtTempTransformSkipFlag[1], cu.m_transformSkip[1] + absPartIdxC, st, st);
-            Buffer.MemoryCopy(m_qtTempTransformSkipFlag[2], cu.m_transformSkip[2] + absPartIdxC, st, st);
+            X265Primitives.CopyBytes(cu.m_cbf[1] + absPartIdxC, m_qtTempCbf[1], st);
+            X265Primitives.CopyBytes(cu.m_cbf[2] + absPartIdxC, m_qtTempCbf[2], st);
+            X265Primitives.CopyBytes(cu.m_transformSkip[1] + absPartIdxC, m_qtTempTransformSkipFlag[1], st);
+            X265Primitives.CopyBytes(cu.m_transformSkip[2] + absPartIdxC, m_qtTempTransformSkipFlag[2], st);
             cu.SetChromIntraDirSubParts(bestMode, absPartIdxC, depth + initTuDepth);
             totalDistortion += bestDist;
         }
