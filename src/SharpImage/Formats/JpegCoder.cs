@@ -167,7 +167,7 @@ public static partial class JpegCoder
         using var buf = new MemoryStream();
         input.CopyTo(buf);
         byte[] data = buf.ToArray();
-        var stream = new MemoryStream(data);
+        var stream = new MemoryStream(data, 0, data.Length, writable: false, publiclyVisible: true);
         if (stream.ReadByte() != 0xFF || stream.ReadByte() != SOI)
         {
             throw new InvalidDataException("Not a valid JPEG file (missing SOI marker).");
@@ -1120,6 +1120,14 @@ public static partial class JpegCoder
             }
         }
 
+        // a stream over a byte array decodes with the array-backed reader (the result does not depend on it)
+        if (stream is MemoryStream arrayStream && arrayStream.TryGetBuffer(out ArraySegment<byte> seg))
+        {
+            DecodeScanBlocksFast(arrayStream, seg, mcuCols, mcuRows, componentCount, components, quantTables, dcTables, acTables,
+                restartInterval, coefficientsOnly);
+            return mcuCols;
+        }
+
         var bitReader = new JpegBitReader(stream);
         int[] dcPredictors = new int[componentCount];
         int mcuCount = 0;
@@ -1165,6 +1173,94 @@ public static partial class JpegCoder
         }
 
         return mcuCols;
+    }
+
+    // DecodeScanBlocks over the array behind a MemoryStream (left at the reader's position)
+    private static void DecodeScanBlocksFast(MemoryStream stream, ArraySegment<byte> seg, int mcuCols, int mcuRows, int componentCount,
+        JpegComponent[] components, int[][] quantTables, HuffmanTable[] dcTables, HuffmanTable[] acTables, int restartInterval,
+        bool coefficientsOnly)
+    {
+        var bits = new JpegFastBits(seg.Array!, seg.Offset + (int)stream.Position);
+        Span<int> dcPredictors = stackalloc int[componentCount];
+        dcPredictors.Clear();
+        int mcuCount = 0;
+        for (int mcuRow = 0;mcuRow < mcuRows;mcuRow++)
+        {
+            for (int mcuCol = 0;mcuCol < mcuCols;mcuCol++)
+            {
+                if (restartInterval > 0 && mcuCount > 0 && mcuCount % restartInterval == 0)
+                {
+                    bits.ConsumeRestartMarker();
+                    dcPredictors.Clear();
+                }
+
+                for (int c = 0;c < componentCount;c++)
+                {
+                    var comp = components[c];
+                    int blocksH = comp.HSample, blocksV = comp.VSample;
+                    HuffmanTable dc = dcTables[comp.DcTableIndex], ac = acTables[comp.AcTableIndex];
+                    for (int bv = 0;bv < blocksV;bv++)
+                    {
+                        for (int bh = 0;bh < blocksH;bh++)
+                        {
+                            int blockIndex = ((mcuRow * blocksV) + bv) * (mcuCols * blocksH) + (mcuCol * blocksH) + bh;
+                            int[] block = comp.Blocks[blockIndex];
+                            DecodeBlockFast(ref bits, block, ref dcPredictors[c], dc, ac);
+                            if (!coefficientsOnly)
+                            {
+                                int[] qt = quantTables[comp.QuantTableIndex];
+                                for (int i = 0;i < 64;i++)
+                                {
+                                    block[i] *= qt[i];
+                                }
+
+                                Dct.InverseDct(block);
+                            }
+                        }
+                    }
+                }
+
+                mcuCount++;
+            }
+        }
+
+        stream.Position = bits.Position - seg.Offset;
+    }
+
+    // DecodeBlock's coefficients into a freshly allocated (zero) block
+    private static void DecodeBlockFast(ref JpegFastBits reader, int[] block, ref int dcPredictor, HuffmanTable dcTable, HuffmanTable acTable)
+    {
+        byte dcCategory = dcTable.Decode(ref reader);
+        int dcDiff = dcCategory > 0 ? JpegBitReader.Extend(reader.ReadBits(dcCategory), dcCategory) : 0;
+        dcPredictor += dcDiff;
+        block[0] = dcPredictor;
+        ReadOnlySpan<byte> natural = JpegTables.NaturalOrder;
+        int position = 1;
+        while (position < 64)
+        {
+            byte acSymbol = acTable.Decode(ref reader);
+            if (acSymbol == 0)
+            {
+                break;
+            }
+
+            int runLength = acSymbol >> 4;
+            int acCategory = acSymbol & 0xF;
+            if (acCategory == 0 && runLength == 15)
+            {
+                position += 16;
+                continue;
+            }
+
+            position += runLength;
+            if (position >= 64)
+            {
+                break;
+            }
+
+            block[natural[position]] = JpegBitReader.Extend(reader.ReadBits(acCategory), acCategory);
+            position++;
+        }
     }
 
     private static void DecodeBlock(JpegBitReader reader, int[] block, ref int dcPredictor,

@@ -496,6 +496,7 @@ public static partial class JpegCoder
             output[o + 4] = RangeLimit(Descale(tmp13 - tmp0, s));
         }
 
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
         static void OddPart(ref int t0, ref int t1, ref int t2, ref int t3)
         {
             int z1 = t0 + t3, z2 = t1 + t2, z3 = t0 + t2, z4 = t1 + t3;
@@ -505,7 +506,9 @@ public static partial class JpegCoder
             z3 += z5; z4 += z5;
             t0 += z1 + z3; t1 += z2 + z4; t2 += z2 + z3; t3 += z1 + z4;
         }
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
         static int Descale(int x, int n) => (x + (1 << (n - 1))) >> n;
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
         static byte RangeLimit(int v)
         {
             int x = v & 1023;

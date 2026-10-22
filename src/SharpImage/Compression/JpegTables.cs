@@ -199,6 +199,232 @@ public sealed class HuffmanTable
 
         return 0; // Invalid code, treat as EOB
     }
+
+    /// <summary><see cref="Decode(JpegBitReader)"/> over a <see cref="JpegFastBits"/>.</summary>
+    internal byte Decode(ref JpegFastBits reader)
+    {
+        if (reader.NoMoreBits)
+        {
+            return 0;
+        }
+
+        int peek = reader.PeekBits(MaxLookupBits);
+        if (reader.NoMoreBits)
+        {
+            return 0;
+        }
+
+        ushort entry = fastLookup[peek];
+        int length = entry >> 8;
+        if (length > 0)
+        {
+            reader.SkipBits(length);
+            return (byte)(entry & 0xFF);
+        }
+
+        int code = reader.ReadBits(9);
+        if (reader.NoMoreBits)
+        {
+            return 0;
+        }
+
+        for (int len = 9;len <= 16;len++)
+        {
+            if (code <= maxCode[len])
+            {
+                return values[code + valOffset[len]];
+            }
+
+            code = (code << 1) | reader.ReadBits(1);
+            if (reader.NoMoreBits)
+            {
+                return 0;
+            }
+        }
+
+        return 0;
+    }
+}
+
+/// <summary>
+/// <see cref="JpegBitReader"/>'s bit semantics over a byte array for a baseline scan, refilling up to 64 bits at a time
+/// instead of a byte per stream read: the same bits, the same 1-fill at a restart marker and 0-fill at another marker
+/// or the end of the data, and NoMoreBits at the same moment (the fill is decided when bits are needed past the data).
+/// It reads ahead up to the next marker, so its position is not a byte-exact stream position.
+/// </summary>
+internal struct JpegFastBits
+{
+    private readonly byte[] data;
+    private readonly int end;
+    private int pos;
+    private ulong buf;
+    private int bits;
+    private bool endOfData, atRestart, stopped;
+    private int stopMarker;
+
+    public JpegFastBits(byte[] data, int pos)
+    {
+        this.data = data;
+        this.pos = pos;
+        end = data.Length;
+        buf = 0;
+        bits = 0;
+        endOfData = atRestart = stopped = false;
+        stopMarker = -1;
+    }
+
+    public readonly bool NoMoreBits => endOfData && bits == 0;
+
+    /// <summary>The next unread byte (at the marker the data stopped at, if it did).</summary>
+    public readonly int Position => pos;
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+    public int ReadBits(int count)
+    {
+        if (count == 0)
+        {
+            return 0;
+        }
+
+        if (bits < count)
+        {
+            Fill(count);
+        }
+
+        bits -= count;
+        return (int)(buf >> bits) & ((1 << count) - 1);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+    public int PeekBits(int count)
+    {
+        if (bits < count)
+        {
+            Fill(count);
+        }
+
+        return (int)(buf >> (bits - count)) & ((1 << count) - 1);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+    public void SkipBits(int count)
+    {
+        if (bits < count)
+        {
+            Fill(count);
+        }
+
+        bits -= count;
+    }
+
+    private void Fill(int count)
+    {
+        // the data bytes up to the next marker (0xFF 0x00 is a stuffed 0xFF; 0xFF at the very end ends the data)
+        while (bits <= 56 && !stopped)
+        {
+            if (pos >= end)
+            {
+                stopped = true;
+                break;
+            }
+
+            int b = data[pos];
+            if (b == 0xFF)
+            {
+                if (pos + 1 >= end)
+                {
+                    pos++;
+                    stopped = true;
+                    break;
+                }
+
+                int m = data[pos + 1];
+                if (m != 0)
+                {
+                    stopped = true;
+                    stopMarker = m;
+                    break;
+                }
+
+                pos += 2;
+            }
+            else
+            {
+                pos++;
+            }
+
+            buf = (buf << 8) | (uint)b;
+            bits += 8;
+        }
+
+        if (bits >= count)
+        {
+            return;
+        }
+
+        // past the data: JpegBitReader's fill (1-bits at a restart marker, else 0-bits and the end of the data)
+        if (!endOfData && !atRestart)
+        {
+            if (stopMarker >= 0xD0 && stopMarker <= 0xD7)
+            {
+                atRestart = true;
+            }
+            else
+            {
+                endOfData = true;
+            }
+        }
+
+        int need = count - bits;
+        buf = (buf << need) | (atRestart ? (1UL << need) - 1 : 0);
+        bits = count;
+    }
+
+    /// <summary><see cref="JpegBitReader.ConsumeRestartMarker"/>.</summary>
+    public void ConsumeRestartMarker()
+    {
+        buf = 0;
+        bits = 0;
+        atRestart = false;
+        endOfData = false;
+        stopped = false;
+        stopMarker = -1;
+        while (pos < end)
+        {
+            if (data[pos++] != 0xFF)
+            {
+                continue;   // stray bytes before the marker
+            }
+
+            int m = pos < end ? data[pos++] : -1;
+            while (m == 0xFF)
+            {
+                m = pos < end ? data[pos++] : -1;
+            }
+
+            if (m < 0)
+            {
+                endOfData = true;
+                stopped = true;
+                return;
+            }
+
+            if (m >= 0xD0 && m <= 0xD7)
+            {
+                return;
+            }
+
+            // not a restart marker: stop at it
+            pos -= 2;
+            stopped = true;
+            stopMarker = m;
+            endOfData = true;
+            return;
+        }
+
+        endOfData = true;
+        stopped = true;
+    }
 }
 
 /// <summary>

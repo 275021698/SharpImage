@@ -29,7 +29,6 @@ public static partial class JpegCoder
         int n = d.ComponentCount;
         var planes = new byte[n][];
         int[] widths = new int[n], heights = new int[n], hs = new int[n], vs = new int[n];
-        Span<byte> block = stackalloc byte[64];
         for (int ci = 0; ci < n; ci++)
         {
             var comp = d.Components[ci];
@@ -41,14 +40,23 @@ public static partial class JpegCoder
             var qt = d.QuantTables[comp.QuantTableIndex];
             if (qt == null) return null;
             int bw = (pw + 7) / 8, bh = (ph + 7) / 8;
-            for (int by = 0; by < bh; by++)
-                for (int bx = 0; bx < bw; bx++)
+            // the blocks are independent: bands of 8 block rows in parallel
+            System.Threading.Tasks.Parallel.For(0, (bh + 7) / 8, band =>
+            {
+                Span<byte> block = stackalloc byte[64];
+                for (int by = band * 8; by < Math.Min(bh, (band + 1) * 8); by++)
                 {
-                    IdctIslow(comp.Blocks[by * comp.BlocksPerRow + bx], qt, block);
-                    for (int y = 0; y < 8 && by * 8 + y < ph; y++)
-                        for (int x = 0; x < 8 && bx * 8 + x < pw; x++)
-                            plane[(by * 8 + y) * pw + bx * 8 + x] = block[y * 8 + x];
+                    for (int bx = 0; bx < bw; bx++)
+                    {
+                        IdctIslow(comp.Blocks[by * comp.BlocksPerRow + bx], qt, block);
+                        int rows = Math.Min(8, ph - (by * 8)), cols = Math.Min(8, pw - (bx * 8));
+                        for (int y = 0; y < rows; y++)
+                        {
+                            block.Slice(y * 8, cols).CopyTo(plane.AsSpan(((by * 8) + y) * pw + (bx * 8), cols));
+                        }
+                    }
                 }
+            });
             planes[ci] = plane;
         }
         return new JpegComponents
