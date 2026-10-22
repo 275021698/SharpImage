@@ -51,6 +51,10 @@ internal sealed unsafe class X265Quant
     private readonly short* m_resiDctCoeff;
     private readonly short* m_fencDctCoeff;
     private readonly short* m_fencShortBuf;
+
+    // the source block m_fencDctCoeff holds the transform of (the psy-RDOQ candidates of a TU share their source)
+    private readonly pixel* m_fencDctSrc;
+    private int m_fencDctLog2 = -1;
     private readonly int*[] m_quantCoef = new int*[6];     // flat: [rem], 32x32 entries
     private readonly int*[] m_dequantCoef = new int*[6];
 
@@ -68,6 +72,7 @@ internal sealed unsafe class X265Quant
         m_resiDctCoeff = arena.Alloc<short>(MAX_TR_SIZE * MAX_TR_SIZE * 2);
         m_fencDctCoeff = m_resiDctCoeff + (MAX_TR_SIZE * MAX_TR_SIZE);
         m_fencShortBuf = arena.Alloc<short>(MAX_TR_SIZE * MAX_TR_SIZE);
+        m_fencDctSrc = arena.Alloc<pixel>(MAX_TR_SIZE * MAX_TR_SIZE);
         for (int rem = 0; rem < 6; rem++)
         {
             m_quantCoef[rem] = arena.Alloc<int>(32 * 32);
@@ -310,8 +315,13 @@ internal sealed unsafe class X265Quant
             if (usePsy)
             {
                 int trSize = 1 << (int)log2TrSize;
-                X265Primitives.CopyPS(m_fencShortBuf, trSize, fenc, fencStride, trSize);
-                X265Primitives.Dct(sizeIdx, m_fencShortBuf, m_fencDctCoeff, trSize);
+                if (m_fencDctLog2 != (int)log2TrSize || !SameBlock(fenc, fencStride, m_fencDctSrc, trSize))
+                {
+                    X265Primitives.CopyPS(m_fencShortBuf, trSize, fenc, fencStride, trSize);
+                    X265Primitives.Dct(sizeIdx, m_fencShortBuf, m_fencDctCoeff, trSize);
+                    X265Primitives.CopyPP(m_fencDctSrc, trSize, fenc, fencStride, trSize, trSize);
+                    m_fencDctLog2 = (int)log2TrSize;
+                }
             }
         }
 
@@ -757,6 +767,21 @@ internal sealed unsafe class X265Quant
         }
 
         return numSig;
+    }
+
+    // whether the n x n block a (stride) equals the packed block b
+    private static bool SameBlock(pixel* a, long stride, pixel* b, int n)
+    {
+        int rowBytes = n * sizeof(pixel);
+        for (int y = 0; y < n; y++, a += stride, b += n)
+        {
+            if (!new ReadOnlySpan<byte>(a, rowBytes).SequenceEqual(new ReadOnlySpan<byte>(b, rowBytes)))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private struct CtxBytes
