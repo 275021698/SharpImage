@@ -328,9 +328,14 @@ internal unsafe class X265Search : X265Predict
                 uint stride = mode.fencYuv.m_size;
 
                 uint lumaPredMode = cu.m_lumaIntraDir[absPartIdx];
-                IntraNeighbors intraNeighbors;
-                InitIntraNeighbors(cu, absPartIdx, tuDepth, true, &intraNeighbors);
-                InitAdiPattern(cu, *cuGeom, absPartIdx, intraNeighbors, (int)lumaPredMode);
+                // (an RDO candidate's TU is the PU EstIntraPredQT just filled the neighbour buffers of, both of them)
+                if (!capture)
+                {
+                    IntraNeighbors intraNeighbors;
+                    InitIntraNeighbors(cu, absPartIdx, tuDepth, true, &intraNeighbors);
+                    InitAdiPattern(cu, *cuGeom, absPartIdx, intraNeighbors, (int)lumaPredMode);
+                }
+
                 PredIntraLumaAng(lumaPredMode, pred, stride, log2TrSize);
 
                 cu.SetTransformSkipSubParts(0, TEXT_LUMA, absPartIdx, fullDepth);
