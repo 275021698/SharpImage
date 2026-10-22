@@ -231,6 +231,18 @@ internal static unsafe partial class X265Primitives
 
     private static void GetResidual8(byte* fenc, byte* pred, short* residual, long stride, int n)
     {
+        if (n == 4)
+        {
+            // two rows per vector
+            var d01 = Sse2.Subtract(Rows4x2(fenc, stride), Rows4x2(pred, stride)).AsInt64();
+            var d23 = Sse2.Subtract(Rows4x2(fenc + (2 * stride), stride), Rows4x2(pred + (2 * stride), stride)).AsInt64();
+            *(long*)residual = d01.ToScalar();
+            *(long*)(residual + stride) = d01.GetElement(1);
+            *(long*)(residual + (2 * stride)) = d23.ToScalar();
+            *(long*)(residual + (3 * stride)) = d23.GetElement(1);
+            return;
+        }
+
         for (int y = 0; y < n; y++, fenc += stride, pred += stride, residual += stride)
         {
             if (n == 4)
@@ -246,6 +258,18 @@ internal static unsafe partial class X265Primitives
     // clip(pred + residual): saturating int16 adds, then packuswb (the same clamp for every int16 residual)
     private static void AddPS8(byte* a, long dstride, byte* b0, short* b1, long sstride0, long sstride1, int n)
     {
+        if (n == 4)
+        {
+            var r01 = Sse2.AddSaturate(Rows4x2(b0, sstride0), Vector128.Create(*(long*)b1, *(long*)(b1 + sstride1)).AsInt16());
+            var r23 = Sse2.AddSaturate(Rows4x2(b0 + (2 * sstride0), sstride0), Vector128.Create(*(long*)(b1 + (2 * sstride1)), *(long*)(b1 + (3 * sstride1))).AsInt16());
+            var p = Sse2.PackUnsignedSaturate(r01, r23).AsUInt32();
+            *(uint*)a = p.ToScalar();
+            *(uint*)(a + dstride) = p.GetElement(1);
+            *(uint*)(a + (2 * dstride)) = p.GetElement(2);
+            *(uint*)(a + (3 * dstride)) = p.GetElement(3);
+            return;
+        }
+
         for (int y = 0; y < n; y++, a += dstride, b0 += sstride0, b1 += sstride1)
         {
             if (n == 4)
@@ -274,6 +298,13 @@ internal static unsafe partial class X265Primitives
 
     private static uint SsePP8(byte* pix1, long stride1, byte* pix2, long stride2, int lx, int ly)
     {
+        if (lx == 4 && ly == 4)
+        {
+            var d01 = Sse2.Subtract(Rows4x2(pix1, stride1), Rows4x2(pix2, stride2));
+            var d23 = Sse2.Subtract(Rows4x2(pix1 + (2 * stride1), stride1), Rows4x2(pix2 + (2 * stride2), stride2));
+            return (uint)Vector128.Sum(Sse2.Add(Sse2.MultiplyAddAdjacent(d01, d01), Sse2.MultiplyAddAdjacent(d23, d23)));
+        }
+
         var acc = Vector128<int>.Zero;
         for (int y = 0; y < ly; y++, pix1 += stride1, pix2 += stride2)
         {
@@ -297,6 +328,17 @@ internal static unsafe partial class X265Primitives
 
     private static void CopyPS8(short* dst, long dstStride, byte* src, long srcStride, int n)
     {
+        if (n == 4)
+        {
+            var r01 = Rows4x2(src, srcStride).AsInt64();
+            var r23 = Rows4x2(src + (2 * srcStride), srcStride).AsInt64();
+            *(long*)dst = r01.ToScalar();
+            *(long*)(dst + dstStride) = r01.GetElement(1);
+            *(long*)(dst + (2 * dstStride)) = r23.ToScalar();
+            *(long*)(dst + (3 * dstStride)) = r23.GetElement(1);
+            return;
+        }
+
         for (int y = 0; y < n; y++, dst += dstStride, src += srcStride)
         {
             if (n == 4)
