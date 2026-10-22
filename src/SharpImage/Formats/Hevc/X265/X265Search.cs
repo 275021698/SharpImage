@@ -82,6 +82,20 @@ internal struct X265Cost
     public uint energy;
 }
 
+/// <summary>
+/// The full-size luma TU of one intra candidate as EstIntraPredQT's RDO pass codes it (no TU splits): the coder state
+/// after it, its prediction, reconstruction, coefficients, cost and cbf.
+/// </summary>
+internal sealed unsafe class X265LumaTu
+{
+    public X265Entropy entropy = null!;
+    public pixel* pred;
+    public pixel* recon;
+    public short* coeff;
+    public X265Cost cost;
+    public uint cbf;
+}
+
 /// <summary>struct RQTData.</summary>
 internal sealed unsafe class X265RqtData
 {
@@ -111,6 +125,13 @@ internal unsafe class X265Search : X265Predict
     protected readonly pixel* m_fencTransposed;
     protected readonly pixel* m_intraPredAngs;
     protected readonly int m_numLayers;
+
+    // EstIntraPredQT remeasures its best candidate allowing TU splits, which first codes the same full-size TU from the
+    // same state as the RDO pass did: that TU is kept from the RDO pass (slot m_lumaTuCur while coding a candidate, the
+    // other slot for the best so far) and replayed instead of coded again
+    private readonly X265LumaTu[] m_lumaTu = new X265LumaTu[2];
+    private int m_lumaTuCur;
+    private bool m_lumaTuCapture, m_lumaTuCaptured, m_lumaTuReplay;
 
     protected X265Search(X265Arena arena, X265Param param) : base(arena, param.internalCsp)
     {
@@ -162,6 +183,17 @@ internal unsafe class X265Search : X265Predict
         {
             m_qtTempCbf[i] = arena.Alloc<byte>(numPartitions);
             m_qtTempTransformSkipFlag[i] = arena.Alloc<byte>(numPartitions);
+        }
+
+        for (int i = 0; i < 2; i++)
+        {
+            m_lumaTu[i] = new X265LumaTu
+            {
+                entropy = new X265Entropy(arena),
+                pred = arena.Alloc<pixel>(32 * 32),
+                recon = arena.Alloc<pixel>(32 * 32),
+                coeff = arena.Alloc<short>(32 * 32),
+            };
         }
 
         m_intraPred = arena.Alloc<pixel>((32 * 32) * (33 + 3));
@@ -254,6 +286,9 @@ internal unsafe class X265Search : X265Predict
         uint log2TrSize = cuGeom->log2CUSize - tuDepth;
         uint qtLayer = log2TrSize - 2;
         int sizeIdx = (int)log2TrSize - 2;
+        // (only the call EstIntraPredQT makes keeps or replays its full-size TU, not the split TUs below it)
+        bool capture = m_lumaTuCapture, replay = m_lumaTuReplay;
+        m_lumaTuCapture = m_lumaTuReplay = false;
         bool mightNotSplit = log2TrSize <= depthRange[1];
         bool mightSplit = (log2TrSize > depthRange[0]) && (bAllowSplit || !mightNotSplit);
         bool bEnableRDOQ = m_param.rdoqLevel != 0;
@@ -270,93 +305,124 @@ internal unsafe class X265Search : X265Predict
                 m_entropyCoder.Store(m_rqt[fullDepth].rqtRoot);
             }
 
-            pixel* fenc = mode.fencYuv.GetLumaAddr(absPartIdx);
-            pixel* pred = mode.predYuv.GetLumaAddr(absPartIdx);
-            short* residual = m_rqt[cuGeom->depth].tmpResiYuv.GetLumaAddr(absPartIdx);
-            uint stride = mode.fencYuv.m_size;
-
-            uint lumaPredMode = cu.m_lumaIntraDir[absPartIdx];
-            IntraNeighbors intraNeighbors;
-            InitIntraNeighbors(cu, absPartIdx, tuDepth, true, &intraNeighbors);
-            InitAdiPattern(cu, *cuGeom, absPartIdx, intraNeighbors, (int)lumaPredMode);
-            PredIntraLumaAng(lumaPredMode, pred, stride, log2TrSize);
-
-            cu.SetTransformSkipSubParts(0, TEXT_LUMA, absPartIdx, fullDepth);
-            cu.SetTUDepthSubParts(tuDepth, absPartIdx, fullDepth);
-
-            uint coeffOffsetY = absPartIdx << (LOG2_UNIT_SIZE * 2);
-            short* coeffY = m_rqt[qtLayer].coeffRQT[0] + coeffOffsetY;
-
-            if (bEnableRDOQ)
+            int tuSize = 1 << (int)log2TrSize;
+            if (replay)
             {
-                m_entropyCoder.EstBit(ref m_entropyCoder.m_estBitsSbac, log2TrSize, true);
-            }
-
-            X265Primitives.GetResidual(fenc, pred, residual, stride, 1 << (int)log2TrSize);
-            uint numSig = m_quant.TransformNxN(cu, fenc, stride, residual, stride, coeffY, log2TrSize, TEXT_LUMA, absPartIdx, false);
-            if (numSig != 0)
-            {
-                m_quant.InvtransformNxN(cu, residual, stride, coeffY, log2TrSize, TEXT_LUMA, true, false, numSig);
-                X265Primitives.AddPS(reconQt, reconQtStride, pred, residual, stride, stride, 1 << (int)log2TrSize);
+                X265LumaTu kept = m_lumaTu[m_lumaTuCur ^ 1];
+                cu.SetTransformSkipSubParts(0, TEXT_LUMA, absPartIdx, fullDepth);
+                cu.SetTUDepthSubParts(tuDepth, absPartIdx, fullDepth);
+                bCBF = kept.cbf;
+                cu.SetCbfSubParts(bCBF, TEXT_LUMA, absPartIdx, fullDepth);
+                X265Primitives.CopyPP(mode.predYuv.GetLumaAddr(absPartIdx), mode.fencYuv.m_size, kept.pred, (uint)tuSize, tuSize, tuSize);
+                X265Primitives.CopyPP(reconQt, reconQtStride, kept.recon, (uint)tuSize, tuSize, tuSize);
+                uint coeffBytes = 2u << (int)(log2TrSize * 2);
+                Buffer.MemoryCopy(kept.coeff, m_rqt[qtLayer].coeffRQT[0] + (absPartIdx << (LOG2_UNIT_SIZE * 2)), coeffBytes, coeffBytes);
+                m_entropyCoder.Load(kept.entropy);
+                fullCost = kept.cost;
             }
             else
             {
-                X265Primitives.CopyPP(reconQt, reconQtStride, pred, stride, 1 << (int)log2TrSize, 1 << (int)log2TrSize);
-            }
+                pixel* fenc = mode.fencYuv.GetLumaAddr(absPartIdx);
+                pixel* pred = mode.predYuv.GetLumaAddr(absPartIdx);
+                short* residual = m_rqt[cuGeom->depth].tmpResiYuv.GetLumaAddr(absPartIdx);
+                uint stride = mode.fencYuv.m_size;
 
-            bCBF = (numSig != 0 ? 1u : 0u) << (int)tuDepth;
-            cu.SetCbfSubParts(bCBF, TEXT_LUMA, absPartIdx, fullDepth);
-            fullCost.distortion = X265Primitives.SsePP(reconQt, reconQtStride, fenc, stride, 1 << (int)log2TrSize, 1 << (int)log2TrSize);
+                uint lumaPredMode = cu.m_lumaIntraDir[absPartIdx];
+                IntraNeighbors intraNeighbors;
+                InitIntraNeighbors(cu, absPartIdx, tuDepth, true, &intraNeighbors);
+                InitAdiPattern(cu, *cuGeom, absPartIdx, intraNeighbors, (int)lumaPredMode);
+                PredIntraLumaAng(lumaPredMode, pred, stride, log2TrSize);
 
-            m_entropyCoder.ResetBits();
-            if (absPartIdx == 0)
-            {
-                m_entropyCoder.CodePartSize(cu, 0, cuGeom->depth);
-            }
+                cu.SetTransformSkipSubParts(0, TEXT_LUMA, absPartIdx, fullDepth);
+                cu.SetTUDepthSubParts(tuDepth, absPartIdx, fullDepth);
 
-            if (cu.m_partSize[0] == SIZE_2Nx2N)
-            {
+                uint coeffOffsetY = absPartIdx << (LOG2_UNIT_SIZE * 2);
+                short* coeffY = m_rqt[qtLayer].coeffRQT[0] + coeffOffsetY;
+
+                if (bEnableRDOQ)
+                {
+                    m_entropyCoder.EstBit(ref m_entropyCoder.m_estBitsSbac, log2TrSize, true);
+                }
+
+                X265Primitives.GetResidual(fenc, pred, residual, stride, 1 << (int)log2TrSize);
+                uint numSig = m_quant.TransformNxN(cu, fenc, stride, residual, stride, coeffY, log2TrSize, TEXT_LUMA, absPartIdx, false);
+                if (numSig != 0)
+                {
+                    m_quant.InvtransformNxN(cu, residual, stride, coeffY, log2TrSize, TEXT_LUMA, true, false, numSig);
+                    X265Primitives.AddPS(reconQt, reconQtStride, pred, residual, stride, stride, 1 << (int)log2TrSize);
+                }
+                else
+                {
+                    X265Primitives.CopyPP(reconQt, reconQtStride, pred, stride, 1 << (int)log2TrSize, 1 << (int)log2TrSize);
+                }
+
+                bCBF = (numSig != 0 ? 1u : 0u) << (int)tuDepth;
+                cu.SetCbfSubParts(bCBF, TEXT_LUMA, absPartIdx, fullDepth);
+                fullCost.distortion = X265Primitives.SsePP(reconQt, reconQtStride, fenc, stride, 1 << (int)log2TrSize, 1 << (int)log2TrSize);
+
+                m_entropyCoder.ResetBits();
                 if (absPartIdx == 0)
                 {
-                    m_entropyCoder.CodeIntraDirLumaAng(cu, 0, false);
+                    m_entropyCoder.CodePartSize(cu, 0, cuGeom->depth);
                 }
-            }
-            else
-            {
-                uint qNumParts = cuGeom->numPartitions >> 2;
-                if (tuDepth == 0)
+
+                if (cu.m_partSize[0] == SIZE_2Nx2N)
                 {
-                    for (uint qIdx = 0; qIdx < 4; ++qIdx)
+                    if (absPartIdx == 0)
                     {
-                        m_entropyCoder.CodeIntraDirLumaAng(cu, qIdx * qNumParts, false);
+                        m_entropyCoder.CodeIntraDirLumaAng(cu, 0, false);
                     }
                 }
-                else if ((absPartIdx & (qNumParts - 1)) == 0)
+                else
                 {
-                    m_entropyCoder.CodeIntraDirLumaAng(cu, absPartIdx, false);
+                    uint qNumParts = cuGeom->numPartitions >> 2;
+                    if (tuDepth == 0)
+                    {
+                        for (uint qIdx = 0; qIdx < 4; ++qIdx)
+                        {
+                            m_entropyCoder.CodeIntraDirLumaAng(cu, qIdx * qNumParts, false);
+                        }
+                    }
+                    else if ((absPartIdx & (qNumParts - 1)) == 0)
+                    {
+                        m_entropyCoder.CodeIntraDirLumaAng(cu, absPartIdx, false);
+                    }
                 }
-            }
 
-            if (log2TrSize != depthRange[0])
-            {
-                m_entropyCoder.CodeTransformSubdivFlag(0, 5 - log2TrSize);
-            }
+                if (log2TrSize != depthRange[0])
+                {
+                    m_entropyCoder.CodeTransformSubdivFlag(0, 5 - log2TrSize);
+                }
 
-            m_entropyCoder.CodeQtCbfLuma(numSig != 0 ? 1u : 0u, tuDepth);
-            if (cu.GetCbf(absPartIdx, TEXT_LUMA, tuDepth) != 0)
-            {
-                m_entropyCoder.CodeCoeffNxN(cu, coeffY, absPartIdx, log2TrSize, TEXT_LUMA);
-            }
+                m_entropyCoder.CodeQtCbfLuma(numSig != 0 ? 1u : 0u, tuDepth);
+                if (cu.GetCbf(absPartIdx, TEXT_LUMA, tuDepth) != 0)
+                {
+                    m_entropyCoder.CodeCoeffNxN(cu, coeffY, absPartIdx, log2TrSize, TEXT_LUMA);
+                }
 
-            fullCost.bits = m_entropyCoder.GetNumberOfWrittenBits();
-            if (m_rdCost.m_psyRd != 0)
-            {
-                fullCost.energy = (uint)X265RdCost.PsyCost(sizeIdx, fenc, mode.fencYuv.m_size, reconQt, reconQtStride);
-                fullCost.rdcost = m_rdCost.CalcPsyRdCost(fullCost.distortion, fullCost.bits, fullCost.energy);
-            }
-            else
-            {
-                fullCost.rdcost = m_rdCost.CalcRdCost(fullCost.distortion, fullCost.bits);
+                fullCost.bits = m_entropyCoder.GetNumberOfWrittenBits();
+                if (m_rdCost.m_psyRd != 0)
+                {
+                    fullCost.energy = (uint)X265RdCost.PsyCost(sizeIdx, fenc, mode.fencYuv.m_size, reconQt, reconQtStride);
+                    fullCost.rdcost = m_rdCost.CalcPsyRdCost(fullCost.distortion, fullCost.bits, fullCost.energy);
+                }
+                else
+                {
+                    fullCost.rdcost = m_rdCost.CalcRdCost(fullCost.distortion, fullCost.bits);
+                }
+
+                if (capture && !mightSplit)
+                {
+                    X265LumaTu keep = m_lumaTu[m_lumaTuCur];
+                    m_entropyCoder.Store(keep.entropy);
+                    X265Primitives.CopyPP(keep.pred, (uint)tuSize, pred, stride, tuSize, tuSize);
+                    X265Primitives.CopyPP(keep.recon, (uint)tuSize, reconQt, reconQtStride, tuSize, tuSize);
+                    uint coeffBytes = 2u << (int)(log2TrSize * 2);
+                    Buffer.MemoryCopy(coeffY, keep.coeff, coeffBytes, coeffBytes);
+                    keep.cost = fullCost;
+                    keep.cbf = bCBF;
+                    m_lumaTuCaptured = true;
+                }
             }
         }
         else
@@ -648,6 +714,7 @@ internal unsafe class X265Search : X265Predict
         for (uint puIdx = 0; puIdx < numPU; puIdx++, absPartIdx += qNumParts)
         {
             uint bmode = 0;
+            bool haveBestTu = false;
             if (intraMode.cu.m_lumaIntraDir[puIdx] != unchecked((byte)ALL_IDX))
             {
                 bmode = intraMode.cu.m_lumaIntraDir[puIdx];
@@ -740,11 +807,19 @@ internal unsafe class X265Search : X265Predict
                     m_entropyCoder.Load(m_rqt[depth].cur);
                     cu.SetLumaIntraDirSubParts(rdModeList[i], absPartIdx, depth + initTuDepth);
                     X265Cost icosts = default;
+                    m_lumaTuCapture = true;
+                    m_lumaTuCaptured = false;
                     CodeIntraLumaQT(intraMode, cuGeom, initTuDepth, absPartIdx, false, ref icosts, depthRange);
                     if (icosts.rdcost < bcost)
                     {
                         bcost = icosts.rdcost;
                         bmode = rdModeList[i];
+                        if (m_lumaTuCaptured)
+                        {
+                            m_lumaTuCur ^= 1;   // the slot just written holds the best
+                        }
+
+                        haveBestTu = m_lumaTuCaptured;
                     }
                 }
             }
@@ -753,6 +828,7 @@ internal unsafe class X265Search : X265Predict
             cu.SetLumaIntraDirSubParts(bmode, absPartIdx, depth + initTuDepth);
             m_entropyCoder.Load(m_rqt[depth].cur);
             X265Cost icosts2 = default;
+            m_lumaTuReplay = haveBestTu;
             CodeIntraLumaQT(intraMode, cuGeom, initTuDepth, absPartIdx, true, ref icosts2, depthRange);
             totalDistortion += icosts2.distortion;
             ExtractIntraResultQT(cu, reconYuv, initTuDepth, absPartIdx);
