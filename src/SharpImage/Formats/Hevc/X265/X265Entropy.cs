@@ -1290,8 +1290,50 @@ internal sealed unsafe partial class X265Entropy
 
     // ---- RDO bit estimates ----
 
+    // the contexts and (log2TrSize << 1 | luma) m_estBitsSbac was last estimated from (EstBitCached)
+    private byte[]? m_estCtx;
+    private uint m_estKey = uint.MaxValue;
+
+    /// <summary>
+    /// EstBit into m_estBitsSbac, skipped when the tables already hold the estimate for this size and plane from the same
+    /// contexts (the RDO candidates of a block all start from one coder state).
+    /// </summary>
+    public void EstBitCached(uint log2TrSize, bool bIsLuma)
+    {
+        uint key = (log2TrSize << 1) | (bIsLuma ? 1u : 0u);
+        m_estCtx ??= new byte[160];
+        fixed (byte* last = m_estCtx)
+        {
+            if (key == m_estKey && SameContexts(last, m_contextState))
+            {
+                return;
+            }
+
+            EstBit(ref m_estBitsSbac, log2TrSize, bIsLuma);
+            for (int i = 0; i < 160; i += 16)
+            {
+                System.Runtime.Intrinsics.Vector128.Store(System.Runtime.Intrinsics.Vector128.Load(m_contextState + i), last + i);
+            }
+        }
+
+        m_estKey = key;
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+    private static bool SameContexts(byte* a, byte* b)
+    {
+        var diff = System.Runtime.Intrinsics.Vector128<byte>.Zero;
+        for (int i = 0; i < 160; i += 16)
+        {
+            diff |= System.Runtime.Intrinsics.Vector128.Load(a + i) ^ System.Runtime.Intrinsics.Vector128.Load(b + i);
+        }
+
+        return diff == System.Runtime.Intrinsics.Vector128<byte>.Zero;
+    }
+
     public void EstBit(ref EstBitsSbac est, uint log2TrSize, bool bIsLuma)
     {
+        m_estKey = uint.MaxValue;   // (whatever it estimates into, the cached tables may change)
         EstCBFBit(ref est);
         EstSignificantCoeffGroupMapBit(ref est, bIsLuma);
         EstSignificantMapBit(ref est, log2TrSize, bIsLuma);

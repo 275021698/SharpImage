@@ -341,7 +341,7 @@ internal unsafe class X265Search : X265Predict
 
                 if (bEnableRDOQ)
                 {
-                    m_entropyCoder.EstBit(ref m_entropyCoder.m_estBitsSbac, log2TrSize, true);
+                    m_entropyCoder.EstBitCached(log2TrSize, true);
                 }
 
                 X265Primitives.GetResidual(fenc, pred, residual, stride, 1 << (int)log2TrSize);
@@ -547,7 +547,7 @@ internal unsafe class X265Search : X265Predict
 
         if (bEnableRDOQ)
         {
-            m_entropyCoder.EstBit(ref m_entropyCoder.m_estBitsSbac, log2TrSizeC, false);
+            m_entropyCoder.EstBitCached(log2TrSizeC, false);
         }
 
         X265ShortYuv resiYuv = m_rqt[cuGeom->depth].tmpResiYuv;
