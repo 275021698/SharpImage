@@ -359,4 +359,35 @@ public class GifAnimationTests
             File.Delete(tempFile);
         }
     }
+
+    [Test]
+    public async Task GifFrameReader_ReadsFramesOneAtATime_AndRewinds()
+    {
+        using var original = CreateTestAnimation(4);
+        original.LoopCount = 3;
+        var stream = new MemoryStream();
+        GifCoder.WriteSequence(original, stream);
+        stream.Position = 0;
+
+        var reader = new GifFrameReader(stream);
+        await Assert.That(reader.CanvasWidth).IsEqualTo(8);
+        await Assert.That(reader.CanvasHeight).IsEqualTo(8);
+
+        var delays = new List<int>();
+        while (reader.ReadNextFrame() is { } frame)
+        {
+            using (frame)
+            {
+                delays.Add(frame.Delay);
+            }
+        }
+        await Assert.That(delays).IsEquivalentTo([10, 20, 30, 40]);
+        await Assert.That(reader.LoopCount).IsEqualTo(3);
+        await Assert.That(reader.ReadNextFrame()).IsNull();
+
+        reader.Rewind();
+        using ImageFrame first = reader.ReadNextFrame()!;
+        await Assert.That(first.Delay).IsEqualTo(10);
+        await Assert.That(first.GetPixelRow(0)[0]).IsEqualTo(Quantum.MaxValue); // red
+    }
 }

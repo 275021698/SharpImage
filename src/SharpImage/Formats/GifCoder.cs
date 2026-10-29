@@ -20,11 +20,11 @@ public static class GifCoder
         data[3] == '8' && (data[4] == '7' || data[4] == '9') && data[5] == 'a';
 
     // GIF block types
-    private const byte ImageSeparator = 0x2C;
-    private const byte ExtensionIntroducer = 0x21;
-    private const byte Trailer = 0x3B;
-    private const byte GraphicControlLabel = 0xF9;
-    private const byte ApplicationExtensionLabel = 0xFF;
+    internal const byte ImageSeparator = 0x2C;
+    internal const byte ExtensionIntroducer = 0x21;
+    internal const byte Trailer = 0x3B;
+    internal const byte GraphicControlLabel = 0xF9;
+    internal const byte ApplicationExtensionLabel = 0xFF;
     private const byte CommentExtensionLabel = 0xFE;
 
     // Interlace pass starting rows and row increments
@@ -463,134 +463,25 @@ public static class GifCoder
     }
 
     /// <summary>
-    /// Reads all frames from an animated GIF stream, returning an ImageSequence.
+    /// Reads all frames from an animated GIF stream, returning an ImageSequence. Every frame is held in memory;
+    /// <see cref="GifFrameReader"/> reads one at a time instead.
     /// </summary>
     public static ImageSequence ReadSequence(Stream stream)
     {
-        Span<byte> header = stackalloc byte[6];
-        stream.ReadExactly(header);
-        if (!header.SequenceEqual("GIF87a"u8) && !header.SequenceEqual("GIF89a"u8))
-            throw new InvalidDataException("Not a valid GIF file.");
-
-        int canvasWidth = ReadUInt16Le(stream);
-        int canvasHeight = ReadUInt16Le(stream);
-        if (canvasWidth <= 0 || canvasHeight <= 0)
-            throw new InvalidDataException($"Invalid GIF canvas dimensions: {canvasWidth}x{canvasHeight}");
-        int packed = stream.ReadByte();
-        bool hasGlobalColorTable = (packed & 0x80) != 0;
-        int globalTableSize = 1 << ((packed & 7) + 1);
-        int backgroundColorIndex = stream.ReadByte();
-        stream.ReadByte(); // aspect ratio
-
-        byte[]? globalColorTable = null;
-        if (hasGlobalColorTable)
-        {
-            globalColorTable = new byte[globalTableSize * 3];
-            stream.ReadExactly(globalColorTable);
-        }
-
+        var reader = new GifFrameReader(stream);
         var sequence = new ImageSequence
         {
-            CanvasWidth = canvasWidth,
-            CanvasHeight = canvasHeight,
-            BackgroundColorIndex = backgroundColorIndex,
+            CanvasWidth = reader.CanvasWidth,
+            CanvasHeight = reader.CanvasHeight,
+            BackgroundColorIndex = reader.BackgroundColorIndex,
             FormatName = "GIF"
         };
 
-        int transparentIndex = -1;
-        int disposalMethod = 0;
-        int delay = 0;
-
-        Span<byte> appId = stackalloc byte[11];
-        while (true)
+        while (reader.ReadNextFrame() is { } frame)
         {
-            int blockType = stream.ReadByte();
-            if (blockType < 0 || blockType == Trailer)
-                break;
-
-            if (blockType == ExtensionIntroducer)
-            {
-                int label = stream.ReadByte();
-                if (label == GraphicControlLabel)
-                {
-                    stream.ReadByte(); // block size (always 4)
-                    int gcPacked = stream.ReadByte();
-                    disposalMethod = (gcPacked >> 2) & 7;
-                    bool hasTransparency = (gcPacked & 1) != 0;
-                    delay = ReadUInt16Le(stream);
-                    int transIdx = stream.ReadByte();
-                    transparentIndex = hasTransparency ? transIdx : -1;
-                    stream.ReadByte(); // block terminator
-                }
-                else if (label == ApplicationExtensionLabel)
-                {
-                    // Check for NETSCAPE2.0 loop extension
-                    int blockSize = stream.ReadByte();
-                    if (blockSize == 11)
-                    {
-                        stream.ReadExactly(appId);
-                        if (appId.SequenceEqual("NETSCAPE2.0"u8))
-                        {
-                            int subBlockSize = stream.ReadByte();
-                            if (subBlockSize == 3)
-                            {
-                                stream.ReadByte(); // sub-block index (1)
-                                sequence.LoopCount = ReadUInt16Le(stream);
-                                stream.ReadByte(); // block terminator
-                            }
-                            else
-                            {
-                                // Skip remaining sub-blocks
-                                if (subBlockSize > 0)
-                                {
-                                    byte[] skip = new byte[subBlockSize];
-                                    stream.ReadExactly(skip);
-                                }
-                                SkipSubBlocks(stream);
-                            }
-                        }
-                        else
-                        {
-                            SkipSubBlocks(stream);
-                        }
-                    }
-                    else
-                    {
-                        if (blockSize > 0)
-                        {
-                            byte[] skip = new byte[blockSize];
-                            stream.ReadExactly(skip);
-                        }
-                        SkipSubBlocks(stream);
-                    }
-                }
-                else
-                {
-                    SkipSubBlocks(stream);
-                }
-            }
-            else if (blockType == ImageSeparator)
-            {
-                var frame = ReadFrameData(stream, canvasWidth, canvasHeight,
-                    globalColorTable, transparentIndex);
-                frame.Delay = delay;
-                frame.DisposeMethod = disposalMethod switch
-                {
-                    0 => DisposeType.Undefined,
-                    1 => DisposeType.None,
-                    2 => DisposeType.Background,
-                    3 => DisposeType.Previous,
-                    _ => DisposeType.Undefined
-                };
-                frame.Iterations = sequence.LoopCount;
-                sequence.AddFrame(frame);
-
-                // Reset per-frame state
-                transparentIndex = -1;
-                disposalMethod = 0;
-                delay = 0;
-            }
+            sequence.AddFrame(frame);
         }
+        sequence.LoopCount = reader.LoopCount;
 
         if (sequence.Count == 0)
             throw new InvalidDataException("GIF contains no image data.");
@@ -602,7 +493,7 @@ public static class GifCoder
     /// Reads a single frame's image data from the stream. Like ReadImageData but also reads
     /// the frame's position offset for sub-frame GIFs.
     /// </summary>
-    private static ImageFrame ReadFrameData(Stream stream, int canvasWidth, int canvasHeight,
+    internal static ImageFrame ReadFrameData(Stream stream, int canvasWidth, int canvasHeight,
         byte[]? globalColorTable, int transparentIndex)
     {
         int left = ReadUInt16Le(stream);
@@ -824,7 +715,7 @@ public static class GifCoder
 
     #region Helpers
 
-    private static void SkipSubBlocks(Stream stream)
+    internal static void SkipSubBlocks(Stream stream)
     {
         while (true)
         {
@@ -847,7 +738,7 @@ public static class GifCoder
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static int ReadUInt16Le(Stream stream)
+    internal static int ReadUInt16Le(Stream stream)
     {
         int low = stream.ReadByte();
         int high = stream.ReadByte();
@@ -862,4 +753,159 @@ public static class GifCoder
     }
 
     #endregion
+}
+
+/// <summary>
+/// Reads an animated GIF one frame at a time, so a long or large animation can be played without holding every
+/// frame in memory. Frames come back as stored (sub-rectangles at <see cref="ImageFrame.Page"/>, with
+/// <see cref="ImageFrame.Delay"/> and <see cref="ImageFrame.DisposeMethod"/> set); compositing them onto the canvas
+/// is the caller's. <see cref="Rewind"/> starts again from the first frame, for looping. Not thread-safe.
+/// </summary>
+public sealed class GifFrameReader
+{
+    private readonly Stream stream;
+    private readonly byte[]? globalColorTable;
+    private readonly long firstBlock;
+    private bool ended;
+
+    /// <summary>Reads the header and global colour table. The stream must be seekable to <see cref="Rewind"/>.</summary>
+    public GifFrameReader(Stream stream)
+    {
+        ArgumentNullException.ThrowIfNull(stream);
+        this.stream = stream;
+
+        Span<byte> header = stackalloc byte[6];
+        stream.ReadExactly(header);
+        if (!header.SequenceEqual("GIF87a"u8) && !header.SequenceEqual("GIF89a"u8))
+            throw new InvalidDataException("Not a valid GIF file.");
+
+        CanvasWidth = GifCoder.ReadUInt16Le(stream);
+        CanvasHeight = GifCoder.ReadUInt16Le(stream);
+        if (CanvasWidth <= 0 || CanvasHeight <= 0)
+            throw new InvalidDataException($"Invalid GIF canvas dimensions: {CanvasWidth}x{CanvasHeight}");
+        int packed = stream.ReadByte();
+        BackgroundColorIndex = stream.ReadByte();
+        stream.ReadByte(); // aspect ratio
+
+        if ((packed & 0x80) != 0)
+        {
+            globalColorTable = new byte[(1 << ((packed & 7) + 1)) * 3];
+            stream.ReadExactly(globalColorTable);
+        }
+
+        firstBlock = stream.CanSeek ? stream.Position : -1;
+    }
+
+    /// <summary>Canvas (logical screen) width.</summary>
+    public int CanvasWidth { get; }
+
+    /// <summary>Canvas (logical screen) height.</summary>
+    public int CanvasHeight { get; }
+
+    /// <summary>Background colour index from the logical screen descriptor.</summary>
+    public int BackgroundColorIndex { get; }
+
+    /// <summary>NETSCAPE2.0 loop count (0 = forever), known once the frames before it have been read.</summary>
+    public int LoopCount { get; private set; }
+
+    /// <summary>The next frame, or null after the last one. The caller owns (and disposes) each frame.</summary>
+    public ImageFrame? ReadNextFrame()
+    {
+        int transparentIndex = -1;
+        int disposalMethod = 0;
+        int delay = 0;
+
+        Span<byte> appId = stackalloc byte[11];
+        while (!ended)
+        {
+            int blockType = stream.ReadByte();
+            if (blockType < 0 || blockType == GifCoder.Trailer)
+            {
+                ended = true;
+                break;
+            }
+
+            if (blockType == GifCoder.ExtensionIntroducer)
+            {
+                int label = stream.ReadByte();
+                if (label == GifCoder.GraphicControlLabel)
+                {
+                    stream.ReadByte(); // block size (always 4)
+                    int gcPacked = stream.ReadByte();
+                    disposalMethod = (gcPacked >> 2) & 7;
+                    bool hasTransparency = (gcPacked & 1) != 0;
+                    delay = GifCoder.ReadUInt16Le(stream);
+                    int transIdx = stream.ReadByte();
+                    transparentIndex = hasTransparency ? transIdx : -1;
+                    stream.ReadByte(); // block terminator
+                }
+                else if (label == GifCoder.ApplicationExtensionLabel)
+                {
+                    ReadApplicationExtension(appId);
+                }
+                else
+                {
+                    GifCoder.SkipSubBlocks(stream);
+                }
+            }
+            else if (blockType == GifCoder.ImageSeparator)
+            {
+                var frame = GifCoder.ReadFrameData(stream, CanvasWidth, CanvasHeight, globalColorTable, transparentIndex);
+                frame.Delay = delay;
+                frame.DisposeMethod = disposalMethod switch
+                {
+                    0 => DisposeType.Undefined,
+                    1 => DisposeType.None,
+                    2 => DisposeType.Background,
+                    3 => DisposeType.Previous,
+                    _ => DisposeType.Undefined
+                };
+                frame.Iterations = LoopCount;
+                return frame;
+            }
+        }
+        return null;
+    }
+
+    /// <summary>Goes back to the first frame.</summary>
+    public void Rewind()
+    {
+        if (firstBlock < 0)
+            throw new NotSupportedException("Rewinding needs a seekable stream.");
+        stream.Position = firstBlock;
+        ended = false;
+    }
+
+    private void ReadApplicationExtension(Span<byte> appId)
+    {
+        // NETSCAPE2.0 carries the loop count; anything else is skipped.
+        int blockSize = stream.ReadByte();
+        if (blockSize != 11)
+        {
+            if (blockSize > 0)
+                stream.ReadExactly(new byte[blockSize]);
+            GifCoder.SkipSubBlocks(stream);
+            return;
+        }
+
+        stream.ReadExactly(appId);
+        if (!appId.SequenceEqual("NETSCAPE2.0"u8))
+        {
+            GifCoder.SkipSubBlocks(stream);
+            return;
+        }
+
+        int subBlockSize = stream.ReadByte();
+        if (subBlockSize == 3)
+        {
+            stream.ReadByte(); // sub-block index (1)
+            LoopCount = GifCoder.ReadUInt16Le(stream);
+            stream.ReadByte(); // block terminator
+            return;
+        }
+
+        if (subBlockSize > 0)
+            stream.ReadExactly(new byte[subBlockSize]);
+        GifCoder.SkipSubBlocks(stream);
+    }
 }
