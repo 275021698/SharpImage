@@ -5,10 +5,16 @@ namespace SharpImage.Image;
 
 /// <summary>
 /// Memory-backed pixel cache. Stores pixel data as a flat ushort array organized by scanline. Each scanline contains
-/// (Columns * NumberOfChannels) quantum values. Uses ArrayPool for large allocations to minimize GC pressure.
+/// (Columns * NumberOfChannels) quantum values. Mid-sized buffers come from ArrayPool to minimize GC pressure;
+/// very large ones are allocated exactly (see <see cref="MaxPooledQuantums"/>).
 /// </summary>
 public class PixelCache : IDisposable
 {
+    // Above this (8 MB) a buffer is allocated rather than rented. The shared pool rounds a rental up to the next
+    // power of two (a 4000x3000 RGB image's 72 MB becomes 134 MB) and keeps returned arrays until a later trim,
+    // so each large decode would leave a buffer nearly twice its size alive long after the image was disposed.
+    private const long MaxPooledQuantums = 4 * 1024 * 1024;
+
     private ushort[]? pixelData;
     private readonly long columns;
     private readonly long rows;
@@ -53,8 +59,8 @@ public class PixelCache : IDisposable
 
         long totalQuantums = strideInQuantums * rows;
 
-        // Use ArrayPool for buffers over 1KB (512 ushorts)
-        if (totalQuantums > 512 && totalQuantums <= int.MaxValue)
+        // Use ArrayPool for buffers over 1KB (512 ushorts), up to MaxPooledQuantums
+        if (totalQuantums > 512 && totalQuantums <= MaxPooledQuantums)
         {
             pixelData = ArrayPool<ushort>.Shared.Rent((int)totalQuantums);
             isPooled = true;
